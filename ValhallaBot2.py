@@ -1392,15 +1392,27 @@ async def on_ready():
             if test_guild_id:
                 guild = discord.Object(id=int(test_guild_id))
                 synced = await bot.tree.sync(guild=guild)
-                logger.info(f"Synced {len(synced)} commands to test guild")
+                logger.info(f"✅ Synced {len(synced)} commands to test guild")
+                # Also try global sync as backup
+                try:
+                    global_synced = await bot.tree.sync()
+                    logger.info(f"✅ Also synced {len(global_synced)} commands globally as backup")
+                except Exception as global_e:
+                    logger.warning(f"Global sync backup failed: {global_e}")
             else:
                 synced = await bot.tree.sync()
-                logger.info(f"Synced {len(synced)} commands globally (dev mode)")
+                logger.info(f"✅ Synced {len(synced)} commands globally (dev mode)")
         else:
             synced = await bot.tree.sync()
             logger.info(f"✅ Synced {len(synced)} slash commands globally")
     except Exception as e:
         logger.error(f"❌ Failed to sync slash commands: {e}")
+        # Try emergency global sync
+        try:
+            emergency_synced = await bot.tree.sync()
+            logger.info(f"⚠️ Emergency global sync: {len(emergency_synced)} commands")
+        except Exception as emergency_e:
+            logger.error(f"❌ Emergency sync also failed: {emergency_e}")
     
     # Start background tasks
     try:
