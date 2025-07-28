@@ -164,141 +164,174 @@ async def initialize_database():
     """Create database tables with production-grade schema and security"""
     logger.info("🗄️ Initializing production database schema...")
     
-    # Enhanced schema with additional security and audit columns
-    create_tables_sql = """
-    -- Users table with enhanced security
-    CREATE TABLE IF NOT EXISTS users (
-        discord_id TEXT PRIMARY KEY CHECK (discord_id ~ '^[0-9]{17,19}$'),
-        twitch_username TEXT UNIQUE CHECK (twitch_username ~ '^[a-zA-Z0-9_]{4,25}$'),
-        rank TEXT DEFAULT 'Thrall' CHECK (rank IN ('Thrall', 'Raider', 'Berserker', 'Jarl', 'Chieftain', 'Allfather')),
-        points INTEGER DEFAULT 0 CHECK (points >= 0),
-        created_at TIMESTAMP DEFAULT NOW(),
-        updated_at TIMESTAMP DEFAULT NOW(),
-        last_activity TIMESTAMP DEFAULT NOW(),
-        is_active BOOLEAN DEFAULT TRUE,
-        metadata JSONB DEFAULT '{}'
-    );
-
-    -- Add is_active column if it doesn't exist (migration)
-    DO $$ 
-    BEGIN 
-        IF NOT EXISTS (SELECT 1 FROM information_schema.columns 
-                      WHERE table_name = 'users' AND column_name = 'is_active') THEN
-            ALTER TABLE users ADD COLUMN is_active BOOLEAN DEFAULT TRUE;
-        END IF;
-    END $$;
-
-    -- Raids table with enhanced tracking
-    CREATE TABLE IF NOT EXISTS raids (
-        id SERIAL PRIMARY KEY,
-        raider_id TEXT NOT NULL CHECK (raider_id ~ '^[0-9]{17,19}$'),
-        target_id TEXT NOT NULL CHECK (target_id ~ '^[0-9]{17,19}$'),
-        viewers INTEGER DEFAULT 0 CHECK (viewers >= 0),
-        points_awarded INTEGER DEFAULT 0 CHECK (points_awarded >= 0),
-        timestamp TIMESTAMP DEFAULT NOW(),
-        raid_data JSONB DEFAULT '{}',
-        processed BOOLEAN DEFAULT FALSE,
-        FOREIGN KEY (raider_id) REFERENCES users(discord_id) ON DELETE CASCADE,
-        FOREIGN KEY (target_id) REFERENCES users(discord_id) ON DELETE CASCADE
-    );
-
-    -- Chat points tracking with audit trail
-    CREATE TABLE IF NOT EXISTS chat_points (
-        id SERIAL PRIMARY KEY,
-        chatter_id TEXT NOT NULL CHECK (chatter_id ~ '^[0-9]{17,19}$'),
-        streamer_id TEXT NOT NULL CHECK (streamer_id ~ '^[0-9]{17,19}$'),
-        points_awarded INTEGER DEFAULT 0 CHECK (points_awarded >= 0),
-        timestamp TIMESTAMP DEFAULT NOW(),
-        session_id UUID DEFAULT gen_random_uuid(),
-        FOREIGN KEY (chatter_id) REFERENCES users(discord_id) ON DELETE CASCADE,
-        FOREIGN KEY (streamer_id) REFERENCES users(discord_id) ON DELETE CASCADE
-    );
-
-    -- Chat counts for statistics
-    CREATE TABLE IF NOT EXISTS chats (
-        chatter_id TEXT NOT NULL CHECK (chatter_id ~ '^[0-9]{17,19}$'),
-        streamer_id TEXT NOT NULL CHECK (streamer_id ~ '^[0-9]{17,19}$'),
-        count INTEGER DEFAULT 0 CHECK (count >= 0),
-        last_chat TIMESTAMP DEFAULT NOW(),
-        PRIMARY KEY (chatter_id, streamer_id),
-        FOREIGN KEY (chatter_id) REFERENCES users(discord_id) ON DELETE CASCADE,
-        FOREIGN KEY (streamer_id) REFERENCES users(discord_id) ON DELETE CASCADE
-    );
-
-    -- Referrals table with enhanced tracking
-    CREATE TABLE IF NOT EXISTS referrals (
-        id SERIAL PRIMARY KEY,
-        referrer_id TEXT NOT NULL CHECK (referrer_id ~ '^[0-9]{17,19}$'),
-        referred_id TEXT NOT NULL CHECK (referred_id ~ '^[0-9]{17,19}$'),
-        awarded BOOLEAN DEFAULT FALSE,
-        points_awarded INTEGER DEFAULT 0,
-        created_at TIMESTAMP DEFAULT NOW(),
-        awarded_at TIMESTAMP,
-        FOREIGN KEY (referrer_id) REFERENCES users(discord_id) ON DELETE CASCADE,
-        FOREIGN KEY (referred_id) REFERENCES users(discord_id) ON DELETE CASCADE,
-        UNIQUE(referrer_id, referred_id)
-    );
-
-    -- Audit log table for security tracking
-    CREATE TABLE IF NOT EXISTS audit_log (
-        id SERIAL PRIMARY KEY,
-        user_id TEXT,
-        action TEXT NOT NULL,
-        details JSONB DEFAULT '{}',
-        ip_address INET,
-        user_agent TEXT,
-        timestamp TIMESTAMP DEFAULT NOW()
-    );
-
-    -- Performance indexes
-    CREATE INDEX IF NOT EXISTS idx_users_twitch ON users(twitch_username) WHERE twitch_username IS NOT NULL;
-    CREATE INDEX IF NOT EXISTS idx_users_created_at ON users(created_at);
-    CREATE INDEX IF NOT EXISTS idx_users_last_activity ON users(last_activity);
-    
-    -- Conditional index creation for is_active column
-    DO $$ 
-    BEGIN 
-        IF EXISTS (SELECT 1 FROM information_schema.columns 
-                  WHERE table_name = 'users' AND column_name = 'is_active') THEN
-            CREATE INDEX IF NOT EXISTS idx_users_points_desc ON users(points DESC) WHERE is_active = TRUE;
-        ELSE
-            CREATE INDEX IF NOT EXISTS idx_users_points_desc ON users(points DESC);
-        END IF;
-    END $$;
-    CREATE INDEX IF NOT EXISTS idx_raids_timestamp_desc ON raids(timestamp DESC);
-    CREATE INDEX IF NOT EXISTS idx_raids_raider ON raids(raider_id, timestamp DESC);
-    CREATE INDEX IF NOT EXISTS idx_raids_target ON raids(target_id, timestamp DESC);
-    CREATE INDEX IF NOT EXISTS idx_chat_points_timestamp ON chat_points(timestamp DESC);
-    CREATE INDEX IF NOT EXISTS idx_chat_points_chatter ON chat_points(chatter_id, timestamp DESC);
-    CREATE INDEX IF NOT EXISTS idx_chat_points_streamer ON chat_points(streamer_id, timestamp DESC);
-    CREATE INDEX IF NOT EXISTS idx_chats_composite ON chats(streamer_id, count DESC);
-    CREATE INDEX IF NOT EXISTS idx_referrals_referrer ON referrals(referrer_id, created_at DESC);
-    CREATE INDEX IF NOT EXISTS idx_audit_log_timestamp ON audit_log(timestamp DESC);
-    CREATE INDEX IF NOT EXISTS idx_audit_log_user ON audit_log(user_id, timestamp DESC);
-
-    -- Create triggers for updated_at
-    CREATE OR REPLACE FUNCTION update_updated_at_column()
-    RETURNS TRIGGER AS $$
-    BEGIN
-        NEW.updated_at = NOW();
-        RETURN NEW;
-    END;
-    $$ language 'plpgsql';
-
-    DROP TRIGGER IF EXISTS update_users_updated_at ON users;
-    CREATE TRIGGER update_users_updated_at
-        BEFORE UPDATE ON users
-        FOR EACH ROW
-        EXECUTE FUNCTION update_updated_at_column();
-    """
-    
     try:
         # Use the production database manager
         conn = await db_manager.get_connection()
         try:
-            await conn.execute(create_tables_sql)
+            # Step 1: Create users table with basic schema
+            await conn.execute("""
+                CREATE TABLE IF NOT EXISTS users (
+                    discord_id TEXT PRIMARY KEY,
+                    twitch_username TEXT UNIQUE,
+                    rank TEXT DEFAULT 'Thrall',
+                    points INTEGER DEFAULT 0,
+                    created_at TIMESTAMP DEFAULT NOW(),
+                    updated_at TIMESTAMP DEFAULT NOW(),
+                    last_activity TIMESTAMP DEFAULT NOW(),
+                    metadata JSONB DEFAULT '{}'
+                )
+            """)
             
-            # Verify critical tables exist
+            # Step 2: Add missing columns if they don't exist
+            await conn.execute("""
+                DO $$ 
+                BEGIN 
+                    -- Add is_active column if missing
+                    IF NOT EXISTS (SELECT 1 FROM information_schema.columns 
+                                  WHERE table_name = 'users' AND column_name = 'is_active') THEN
+                        ALTER TABLE users ADD COLUMN is_active BOOLEAN DEFAULT TRUE;
+                    END IF;
+                    
+                    -- Add constraints if table already exists
+                    BEGIN
+                        ALTER TABLE users ADD CONSTRAINT check_discord_id CHECK (discord_id ~ '^[0-9]{17,19}$');
+                    EXCEPTION
+                        WHEN duplicate_object THEN NULL;
+                    END;
+                    
+                    BEGIN
+                        ALTER TABLE users ADD CONSTRAINT check_twitch_username CHECK (twitch_username ~ '^[a-zA-Z0-9_]{4,25}$');
+                    EXCEPTION
+                        WHEN duplicate_object THEN NULL;
+                    END;
+                    
+                    BEGIN
+                        ALTER TABLE users ADD CONSTRAINT check_rank CHECK (rank IN ('Thrall', 'Raider', 'Berserker', 'Jarl', 'Chieftain', 'Allfather'));
+                    EXCEPTION
+                        WHEN duplicate_object THEN NULL;
+                    END;
+                    
+                    BEGIN
+                        ALTER TABLE users ADD CONSTRAINT check_points CHECK (points >= 0);
+                    EXCEPTION
+                        WHEN duplicate_object THEN NULL;
+                    END;
+                END $$
+            """)
+            
+            # Step 3: Create other tables
+            await conn.execute("""
+                CREATE TABLE IF NOT EXISTS raids (
+                    id SERIAL PRIMARY KEY,
+                    raider_id TEXT NOT NULL,
+                    target_id TEXT NOT NULL,
+                    viewers INTEGER DEFAULT 0,
+                    points_awarded INTEGER DEFAULT 0,
+                    timestamp TIMESTAMP DEFAULT NOW(),
+                    raid_data JSONB DEFAULT '{}',
+                    processed BOOLEAN DEFAULT FALSE
+                )
+            """)
+            
+            await conn.execute("""
+                CREATE TABLE IF NOT EXISTS chat_points (
+                    id SERIAL PRIMARY KEY,
+                    chatter_id TEXT NOT NULL,
+                    streamer_id TEXT NOT NULL,
+                    points_awarded INTEGER DEFAULT 0,
+                    timestamp TIMESTAMP DEFAULT NOW(),
+                    session_id UUID DEFAULT gen_random_uuid()
+                )
+            """)
+            
+            await conn.execute("""
+                CREATE TABLE IF NOT EXISTS chats (
+                    chatter_id TEXT NOT NULL,
+                    streamer_id TEXT NOT NULL,
+                    count INTEGER DEFAULT 0,
+                    last_chat TIMESTAMP DEFAULT NOW(),
+                    PRIMARY KEY (chatter_id, streamer_id)
+                )
+            """)
+            
+            await conn.execute("""
+                CREATE TABLE IF NOT EXISTS referrals (
+                    id SERIAL PRIMARY KEY,
+                    referrer_id TEXT NOT NULL,
+                    referred_id TEXT NOT NULL,
+                    awarded BOOLEAN DEFAULT FALSE,
+                    points_awarded INTEGER DEFAULT 0,
+                    created_at TIMESTAMP DEFAULT NOW(),
+                    awarded_at TIMESTAMP,
+                    UNIQUE(referrer_id, referred_id)
+                )
+            """)
+            
+            await conn.execute("""
+                CREATE TABLE IF NOT EXISTS audit_log (
+                    id SERIAL PRIMARY KEY,
+                    user_id TEXT,
+                    action TEXT NOT NULL,
+                    details JSONB DEFAULT '{}',
+                    ip_address INET,
+                    user_agent TEXT,
+                    timestamp TIMESTAMP DEFAULT NOW()
+                )
+            """)
+            
+            # Step 4: Create indexes safely
+            indexes = [
+                "CREATE INDEX IF NOT EXISTS idx_users_twitch ON users(twitch_username) WHERE twitch_username IS NOT NULL",
+                "CREATE INDEX IF NOT EXISTS idx_users_created_at ON users(created_at)",
+                "CREATE INDEX IF NOT EXISTS idx_users_last_activity ON users(last_activity)",
+                "CREATE INDEX IF NOT EXISTS idx_raids_timestamp_desc ON raids(timestamp DESC)",
+                "CREATE INDEX IF NOT EXISTS idx_chat_points_timestamp ON chat_points(timestamp DESC)",
+                "CREATE INDEX IF NOT EXISTS idx_audit_log_timestamp ON audit_log(timestamp DESC)"
+            ]
+            
+            for index_sql in indexes:
+                try:
+                    await conn.execute(index_sql)
+                except Exception as idx_error:
+                    logger.warning(f"Index creation failed (non-critical): {idx_error}")
+            
+            # Step 5: Create points index with is_active check
+            try:
+                await conn.execute("""
+                    DO $$ 
+                    BEGIN 
+                        IF EXISTS (SELECT 1 FROM information_schema.columns 
+                                  WHERE table_name = 'users' AND column_name = 'is_active') THEN
+                            CREATE INDEX IF NOT EXISTS idx_users_points_desc ON users(points DESC) WHERE is_active = TRUE;
+                        ELSE
+                            CREATE INDEX IF NOT EXISTS idx_users_points_desc ON users(points DESC);
+                        END IF;
+                    END $$
+                """)
+            except Exception as idx_error:
+                logger.warning(f"Points index creation failed (non-critical): {idx_error}")
+            
+            # Step 6: Create trigger function
+            await conn.execute("""
+                CREATE OR REPLACE FUNCTION update_updated_at_column()
+                RETURNS TRIGGER AS $$
+                BEGIN
+                    NEW.updated_at = NOW();
+                    RETURN NEW;
+                END;
+                $$ language 'plpgsql'
+            """)
+            
+            # Step 7: Create trigger
+            await conn.execute("""
+                DROP TRIGGER IF EXISTS update_users_updated_at ON users;
+                CREATE TRIGGER update_users_updated_at
+                    BEFORE UPDATE ON users
+                    FOR EACH ROW
+                    EXECUTE FUNCTION update_updated_at_column()
+            """)
+            
+            # Step 8: Verify critical tables exist
             tables_to_verify = ['users', 'raids', 'chat_points', 'chats', 'referrals', 'audit_log']
             for table in tables_to_verify:
                 result = await conn.fetchval(
@@ -308,7 +341,7 @@ async def initialize_database():
                 if not result:
                     raise DatabaseError(f"Failed to create table: {table}")
             
-            # Log audit event
+            # Step 9: Log audit event
             await conn.execute(
                 "INSERT INTO audit_log (action, details) VALUES ($1, $2)",
                 "database_initialized",
