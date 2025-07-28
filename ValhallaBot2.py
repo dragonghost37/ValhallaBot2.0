@@ -2498,6 +2498,7 @@ async def help_slash(interaction: discord.Interaction):
     embed.add_field(name="/refer <user>", value="Refer someone to earn bonus points", inline=False)
     embed.add_field(name="/howtouse", value="Complete guide on using the bot", inline=False)
     embed.add_field(name="/unlinktwitch", value="Unlink your Twitch account", inline=False)
+    embed.add_field(name="/addpoints <user> <points>", value="(Admin) Award/deduct points", inline=False)
     embed.add_field(name="/newmember_stats", value="(Admin) View onboarding statistics", inline=False)
     embed.set_footer(text="🛡️ Fight. Raid. Rank up. Valhalla is watching.")
     
@@ -2558,6 +2559,229 @@ async def how_to_use_slash(interaction: discord.Interaction):
     embed.timestamp = datetime.utcnow()
 
     await interaction.response.send_message(embed=embed, ephemeral=True)
+
+@bot.tree.command(name="addpoints", description="Award points to a specific user (Admin only)")
+@app_commands.describe(
+    user="The Discord user to award points to",
+    points="Number of points to add (can be negative to subtract)",
+    reason="Reason for awarding points (optional)"
+)
+async def addpoints_slash(
+    interaction: discord.Interaction,
+    user: discord.User,
+    points: int,
+    reason: str = None
+):
+    try:
+        # Check admin permissions
+        is_admin = interaction.user.guild_permissions.administrator
+        is_owner = interaction.user.id == interaction.guild.owner_id
+        if not (is_admin or is_owner):
+            await interaction.response.send_message(
+                "❌ You don't have permission to use this command. Only administrators can award points.",
+                ephemeral=True
+            )
+            return
+
+        # Rate limiting check
+        if not await check_rate_limit(interaction.user.id):
+            await interaction.response.send_message(
+                "⏰ You're using commands too quickly. Please wait a moment.",
+                ephemeral=True
+            )
+            return
+
+        # Validate points input
+        if points == 0:
+            await interaction.response.send_message(
+                "❌ Points must be a non-zero number.",
+                ephemeral=True
+            )
+            return
+
+        if abs(points) > 10000:
+            await interaction.response.send_message(
+                "❌ Points must be between -10,000 and 10,000.",
+                ephemeral=True
+            )
+            return
+
+        discord_id = str(user.id)
+
+        async with pool.acquire() as conn:
+            # Check if user exists in database
+            user_row = await conn.fetchrow(
+                "SELECT points, rank, twitch_username FROM users WHERE discord_id = $1",
+                discord_id
+            )
+
+            if not user_row:
+                # Create new user entry if they don't exist
+                await conn.execute("""
+                    INSERT INTO users (discord_id, rank, points, created_at)
+                    VALUES ($1, 'Thrall', 0, NOW())
+                """, discord_id)
+                old_points = 0
+                old_rank = "Thrall"
+                twitch_username = None
+            else:
+                old_points = user_row["points"]
+                old_rank = user_row["rank"]
+                twitch_username = user_row["twitch_username"]
+
+            # Calculate new points (ensure they don't go below 0)
+            new_points = max(0, old_points + points)
+            actual_points_added = new_points - old_points
+
+            # Update points
+            await conn.execute(
+                "UPDATE users SET points = $1, last_activity = NOW() WHERE discord_id = $2",
+                new_points, discord_id
+            )
+
+            # Update rank based on new points
+            await update_user_rank(conn, discord_id)
+
+            # Get new rank after update
+            updated_row = await conn.fetchrow(
+                "SELECT rank FROM users WHERE discord_id = $1",
+                discord_id
+            )
+            new_rank = updated_row["rank"] if updated_row else "Thrall"
+
+            # Log the action in audit log
+            action_details = {
+                "points_added": actual_points_added,
+                "old_points": old_points,
+                "new_points": new_points,
+                "old_rank": old_rank,
+                "new_rank": new_rank,
+                "target_user": f"{user.display_name} ({user.id})",
+                "reason": reason or "No reason provided"
+            }
+
+            await conn.execute(
+                "INSERT INTO audit_log (user_id, action, details) VALUES ($1, $2, $3)",
+                str(interaction.user.id),
+                "admin_points_awarded",
+                json.dumps(action_details)
+            )
+
+        # Create response embed
+        action_text = "awarded" if actual_points_added > 0 else "deducted"
+        embed = discord.Embed(
+            title="💰 Points Updated",
+            color=0x00FF00 if actual_points_added > 0 else 0xFF4500
+        )
+
+        embed.add_field(
+            name="User",
+            value=f"{user.mention} ({user.display_name})",
+            inline=True
+        )
+
+        embed.add_field(
+            name="Points Change",
+            value=f"{'+' if actual_points_added > 0 else ''}{actual_points_added:,}",
+            inline=True
+        )
+
+        embed.add_field(
+            name="New Total",
+            value=f"{new_points:,} points",
+            inline=True
+        )
+
+        if old_rank != new_rank:
+            embed.add_field(
+                name="Rank Change",
+                value=f"{old_rank} → **{new_rank}**",
+                inline=False
+            )
+
+        if twitch_username:
+            embed.add_field(
+                name="Twitch Account",
+                value=f"[{twitch_username}](https://twitch.tv/{twitch_username})",
+                inline=True
+            )
+
+        if reason:
+            embed.add_field(
+                name="Reason",
+                value=reason,
+                inline=False
+            )
+
+        embed.add_field(
+            name="Admin",
+            value=interaction.user.mention,
+            inline=True
+        )
+
+        embed.timestamp = datetime.utcnow()
+        embed.set_footer(text="Admin action logged in audit trail")
+
+        await interaction.response.send_message(embed=embed, ephemeral=True)
+
+        # Send notification to bot-commands channel
+        try:
+            channel = discord.utils.get(interaction.guild.text_channels, name="╡bot-commands")
+            if channel:
+                public_embed = discord.Embed(
+                    title="⚖️ Admin Point Award",
+                    color=0xFFD700,
+                    description=f"An admin has {'awarded' if actual_points_added > 0 else 'deducted'} points!"
+                )
+                
+                public_embed.add_field(
+                    name="Recipient",
+                    value=user.mention,
+                    inline=True
+                )
+                
+                public_embed.add_field(
+                    name="Points",
+                    value=f"{'+' if actual_points_added > 0 else ''}{actual_points_added:,}",
+                    inline=True
+                )
+                
+                public_embed.add_field(
+                    name="New Total",
+                    value=f"{new_points:,}",
+                    inline=True
+                )
+                
+                if old_rank != new_rank:
+                    public_embed.add_field(
+                        name="Rank Update",
+                        value=f"{old_rank} → **{new_rank}**",
+                        inline=False
+                    )
+                
+                if reason:
+                    public_embed.add_field(
+                        name="Reason",
+                        value=reason,
+                        inline=False
+                    )
+                
+                public_embed.timestamp = datetime.utcnow()
+                await channel.send(embed=public_embed)
+                
+        except Exception as e:
+            logger.error(f"Failed to send public notification: {e}")
+
+        logger.info(f"Admin {interaction.user} awarded {actual_points_added} points to {user} (reason: {reason or 'None'})")
+
+    except Exception as e:
+        logger.error(f"Error in /addpoints: {e}")
+        traceback.print_exc()
+        if not interaction.response.is_done():
+            await interaction.response.send_message(
+                "❌ An error occurred while awarding points. Please try again.",
+                ephemeral=True
+            )
 
 # ---- WEBHOOK SERVER SETUP ---- #
 async def setup_webhook_server():
