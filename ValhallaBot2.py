@@ -179,6 +179,15 @@ async def initialize_database():
         metadata JSONB DEFAULT '{}'
     );
 
+    -- Add is_active column if it doesn't exist (migration)
+    DO $$ 
+    BEGIN 
+        IF NOT EXISTS (SELECT 1 FROM information_schema.columns 
+                      WHERE table_name = 'users' AND column_name = 'is_active') THEN
+            ALTER TABLE users ADD COLUMN is_active BOOLEAN DEFAULT TRUE;
+        END IF;
+    END $$;
+
     -- Raids table with enhanced tracking
     CREATE TABLE IF NOT EXISTS raids (
         id SERIAL PRIMARY KEY,
@@ -243,9 +252,19 @@ async def initialize_database():
 
     -- Performance indexes
     CREATE INDEX IF NOT EXISTS idx_users_twitch ON users(twitch_username) WHERE twitch_username IS NOT NULL;
-    CREATE INDEX IF NOT EXISTS idx_users_points_desc ON users(points DESC) WHERE is_active = TRUE;
     CREATE INDEX IF NOT EXISTS idx_users_created_at ON users(created_at);
     CREATE INDEX IF NOT EXISTS idx_users_last_activity ON users(last_activity);
+    
+    -- Conditional index creation for is_active column
+    DO $$ 
+    BEGIN 
+        IF EXISTS (SELECT 1 FROM information_schema.columns 
+                  WHERE table_name = 'users' AND column_name = 'is_active') THEN
+            CREATE INDEX IF NOT EXISTS idx_users_points_desc ON users(points DESC) WHERE is_active = TRUE;
+        ELSE
+            CREATE INDEX IF NOT EXISTS idx_users_points_desc ON users(points DESC);
+        END IF;
+    END $$;
     CREATE INDEX IF NOT EXISTS idx_raids_timestamp_desc ON raids(timestamp DESC);
     CREATE INDEX IF NOT EXISTS idx_raids_raider ON raids(raider_id, timestamp DESC);
     CREATE INDEX IF NOT EXISTS idx_raids_target ON raids(target_id, timestamp DESC);
