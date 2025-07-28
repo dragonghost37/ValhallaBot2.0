@@ -1,35 +1,21 @@
 #!/usr/bin/env python3
-"""
-ValhallaBot2.py - Production-Ready Discord/Twitch Integration Bot
-
-A comprehensive Discord bot with Twitch integration featuring:
-- Robust security and authentication
-- Comprehensive monitoring and metrics
-- Advanced error handling and retry logic
-- Input validation and sanitization
-- Production-grade configuration management
-- Health checks and observability
-
-Author: ValhallaBot Team
-Version: 2.0.0-production
-"""
-
-import discord
-from discord.ext import commands, tasks
-from discord import app_commands, Embed
-import asyncpg
-import asyncio
-import os
-import aiohttp
-from aiohttp import web
-import json
-# TwitchIO v3 integration will be imported when needed to avoid circular imports
-from datetime import datetime, timezone, timedelta
-import logging
-import traceback
-import signal
 import sys
 import time
+import json
+import logging
+import asyncio
+import discord
+from discord.ext import commands, tasks
+import aiohttp
+from aiohttp import web
+
+from datetime import datetime, timezone, timedelta
+from discord import app_commands, Embed
+import traceback
+import signal
+import os
+from discord import Embed
+from twitchio.ext import commands as twitch_commands
 from collections import defaultdict, deque
 import ssl
 from typing import Dict, Any, Optional, List
@@ -362,41 +348,34 @@ async def initialize_database():
 
 # ---- PRODUCTION TWITCH INTEGRATION ---- #
 @with_retry(RetryConfig(max_attempts=3, base_delay=1.0))
-async def get_all_twitch_users() -> List[str]:
-    """Get all linked Twitch usernames from database with validation"""
+async def get_all_twitch_users() -> dict:
+    """Get all linked Twitch usernames and their Discord IDs from database with validation"""
     request_id = str(uuid.uuid4())
     monitoring.performance_monitor.start_request(request_id, "get_all_twitch_users")
-    
     try:
         conn = await db_manager.get_connection()
         try:
-            # Use parameterized query with validation
             rows = await conn.fetch(
-                "SELECT twitch_username FROM users WHERE twitch_username IS NOT NULL AND is_active = TRUE"
+                "SELECT twitch_username, discord_id FROM users WHERE twitch_username IS NOT NULL AND is_active = TRUE"
             )
-            
-            usernames = []
+            user_map = {}
             for row in rows:
                 try:
-                    # Validate each username before returning
-                    validated_username = InputValidator.validate_twitch_username(row['twitch_username'])
-                    usernames.append(validated_username)
+                    username = InputValidator.validate_twitch_username(row['twitch_username'])
+                    discord_id = InputValidator.validate_discord_id(row['discord_id'])
+                    user_map[username] = discord_id
                 except ValidationError as e:
-                    logger.warning(f"Invalid Twitch username in database: {row['twitch_username']} - {e}")
-                    continue
-            
-            monitoring.metrics.set_gauge("active_twitch_users", len(usernames))
+                    logger.warning(f"Invalid user in get_all_twitch_users: {e}")
+            monitoring.metrics.set_gauge("active_twitch_users", len(user_map))
             monitoring.performance_monitor.end_request(request_id, True)
-            return usernames
-            
+            return user_map
         finally:
             await db_manager.pool.release(conn)
-            
     except Exception as e:
         logger.error(f"Failed to get Twitch users: {e}")
         error_handler.handle_error(e, "get_all_twitch_users")
         monitoring.performance_monitor.end_request(request_id, False)
-        return []
+        return {}
 
 @with_retry(RetryConfig(max_attempts=3, base_delay=2.0))
 async def get_twitch_oauth_token() -> Optional[str]:
@@ -953,8 +932,50 @@ async def log_chat(chatter_discord_id, streamer_discord_id):
         """, chatter_discord_id, streamer_discord_id)
 
 # ---- TWITCH BOT INTEGRATION ---- #
-# TwitchIO v3 integration is handled in twitch_integration.py
-# This section is reserved for TwitchBot instance management
+from twitchio.ext import commands as twitch_commands
+
+# ---- TWITCH BOT INTEGRATION ---- #
+class TwitchBot(twitch_commands.Bot):
+    def __init__(self, chat_counts, user_map, channels):
+        super().__init__(
+            token=config.twitch.bot_token,
+            prefix="!",
+            initial_channels=[]
+        )
+        self.chat_counts = chat_counts
+        self.user_map = user_map
+        self.channels_to_join = channels
+
+    async def event_ready(self):
+        logger.info(f"TwitchBot connected as {self.nick}")
+        try:
+            await self.join_channels(self.channels_to_join)
+        except Exception as e:
+            logger.exception("Error joining Twitch channels:")
+
+    async def event_message(self, message):
+        if message.echo:
+            return
+        chatter = message.author.name.lower()
+        streamer = message.channel.name.lower()
+        discord_chatter = self.user_map.get(chatter)
+        discord_streamer = self.user_map.get(streamer)
+        # Prevent users from earning points for chatting in their own stream
+        if discord_chatter and discord_streamer and discord_chatter != discord_streamer:
+            if streamer not in self.chat_counts:
+                self.chat_counts[streamer] = {}
+            if discord_chatter not in self.chat_counts[streamer]:
+                self.chat_counts[streamer][discord_chatter] = 0
+            self.chat_counts[streamer][discord_chatter] += 1
+            await log_chat(discord_chatter, discord_streamer)
+
+async def log_chat(chatter_discord_id, streamer_discord_id):
+    async with pool.acquire() as conn:
+        await conn.execute("""
+            INSERT INTO chats (chatter_id, streamer_id, count)
+            VALUES ($1, $2, 1)
+            ON CONFLICT (chatter_id, streamer_id) DO UPDATE SET count = chats.count + 1
+        """, chatter_discord_id, streamer_discord_id)
 
 # ---- BACKGROUND TASKS ---- #
 @tasks.loop(minutes=1)
@@ -1302,28 +1323,25 @@ async def update_twitch_bot_channels():
         return
     
     try:
-        # Get current linked users
+        # Get all linked users (username -> discord_id)
         current_users = await get_all_twitch_users()
         current_channels = set(current_users.keys())
-        
         # Get channels bot is currently in
         connected_channels = set(channel.name for channel in twitch_bot_instance.connected_channels)
-        
-        # Join new channels
+        # Join any new channels
         to_join = current_channels - connected_channels
         for channel in to_join:
             await twitch_bot_instance.join_channel(channel)
-        
-        # Leave old channels
+            logger.info(f"TwitchBot joined channel: {channel}")
+        # Leave any channels that are no longer linked (should not happen, but for safety)
         to_leave = connected_channels - current_channels
         for channel in to_leave:
             await twitch_bot_instance.leave_channel(channel)
-        
-        # Update the user mapping
+            logger.info(f"TwitchBot left channel: {channel}")
+        # Always update the user mapping
+        twitch_to_discord.clear()
         twitch_to_discord.update(current_users)
-        
-        logger.info(f"Updated Twitch channels: +{len(to_join)} -{len(to_leave)}")
-        
+        logger.info(f"TwitchBot channel sync complete. Now in {len(current_channels)} channels.")
     except Exception as e:
         logger.error(f"Error updating Twitch bot channels: {e}")
 
@@ -1603,6 +1621,11 @@ async def on_app_command_error(interaction: discord.Interaction, error: app_comm
     twitch_username="Your Twitch username",
     user="(Admin only) Discord user to link this Twitch to"
 )
+async def linktwitch_slash(interaction: discord.Interaction, twitch_username: str, user: Optional[discord.User] = None):
+    # ...existing code for linking user...
+    # After linking, update TwitchBot channels
+    await update_twitch_bot_channels()
+    # ...existing code...
 async def linktwitch_slash(
     interaction: discord.Interaction,
     twitch_username: str,

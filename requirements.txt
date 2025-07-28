@@ -3,6 +3,9 @@
 # Discord
 discord.py>=2.3.0
 
+# Twitch
+twitchio>=2.7.0
+
 # Database
 asyncpg>=0.28.0
 
