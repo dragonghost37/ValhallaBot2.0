@@ -957,7 +957,7 @@ async def log_chat(chatter_discord_id, streamer_discord_id):
 # This section is reserved for TwitchBot instance management
 
 # ---- BACKGROUND TASKS ---- #
-@tasks.loop(minutes=5)
+@tasks.loop(minutes=1)
 async def check_live_streams():
     global currently_live
     global twitch_token
@@ -1143,7 +1143,7 @@ async def check_live_streams():
     currently_live.clear()
     currently_live.update(live_now)
 
-@tasks.loop(minutes=5)
+@tasks.loop(minutes=1)
 async def auto_post_currently_live():
     global last_live_set
     await bot.wait_until_ready()
