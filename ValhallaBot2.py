@@ -897,43 +897,42 @@ async def check_live_streams():
             'Client-ID': TWITCH_CLIENT_ID,
             'Authorization': f'Bearer {twitch_token}'
         }
-
-    for user in users:
-        twitch_username = user[1]
-        url = f"https://api.twitch.tv/helix/streams?user_login={twitch_username}"
-        try:
-            async with session.get(url, headers=headers) as resp:
-                if resp.status == 401:
-                    # Token expired, refresh and retry once
-                    print("Twitch token expired, refreshing...")
-                    new_token = await get_twitch_oauth_token()
-                    if new_token:
-                        globals()['twitch_token'] = new_token
-                        headers['Authorization'] = f'Bearer {new_token}'
-                        async with session.get(url, headers=headers) as resp2:
-                            data = await resp2.json()
-                            if data.get('data'):
-                                stream = data['data'][0]
-                                live_now.add(twitch_username)
-                                stream_info[twitch_username] = {
-                                    'game_name': stream.get('game_name', 'Unknown'),
-                                    'title': stream.get('title', ''),
-                                    'viewer_count': stream.get('viewer_count', 0)
-                                }
+        for user in users:
+            twitch_username = user[1]
+            url = f"https://api.twitch.tv/helix/streams?user_login={twitch_username}"
+            try:
+                async with session.get(url, headers=headers) as resp:
+                    if resp.status == 401:
+                        # Token expired, refresh and retry once
+                        print("Twitch token expired, refreshing...")
+                        new_token = await get_twitch_oauth_token()
+                        if new_token:
+                            globals()['twitch_token'] = new_token
+                            headers['Authorization'] = f'Bearer {new_token}'
+                            async with session.get(url, headers=headers) as resp2:
+                                data = await resp2.json()
+                                if data.get('data'):
+                                    stream = data['data'][0]
+                                    live_now.add(twitch_username)
+                                    stream_info[twitch_username] = {
+                                        'game_name': stream.get('game_name', 'Unknown'),
+                                        'title': stream.get('title', ''),
+                                        'viewer_count': stream.get('viewer_count', 0)
+                                    }
+                        else:
+                            print("Failed to refresh Twitch token.")
                     else:
-                        print("Failed to refresh Twitch token.")
-                else:
-                    data = await resp.json()
-                    if data.get('data'):
-                        stream = data['data'][0]
-                        live_now.add(twitch_username)
-                        stream_info[twitch_username] = {
-                            'game_name': stream.get('game_name', 'Unknown'),
-                            'title': stream.get('title', ''),
-                            'viewer_count': stream.get('viewer_count', 0)
-                        }
-        except Exception as e:
-            print(f"Error checking stream status for {twitch_username}: {e}")
+                        data = await resp.json()
+                        if data.get('data'):
+                            stream = data['data'][0]
+                            live_now.add(twitch_username)
+                            stream_info[twitch_username] = {
+                                'game_name': stream.get('game_name', 'Unknown'),
+                                'title': stream.get('title', ''),
+                                'viewer_count': stream.get('viewer_count', 0)
+                            }
+            except Exception as e:
+                print(f"Error checking stream status for {twitch_username}: {e}")
 
     # Handle newly live streams
     newly_live = live_now - currently_live
@@ -971,6 +970,8 @@ async def check_live_streams():
             )
             embed.timestamp = datetime.now(timezone.utc)
             embed.set_footer(text="\nᚠᚢᚾᛖᚱᚨᛚᚠᚢᚾᛖᚱᚨᛚ\nMay Odin guide your stream!\nᚠᚢᚾᛖᚱᚨᛚᚠᚢᚾᛖᚱᚨᛚ\n")
+
+            # Always post a new embed for each user going live
             await channel.send(embed=embed)
 
     # Handle ended streams
@@ -991,9 +992,11 @@ async def check_live_streams():
                     break
             
             # Fetch rank from DB
-            row = await conn.fetchrow("SELECT rank FROM users WHERE discord_id = $1", str(discord_id))
-            if row:
-                rank = row["rank"]
+            async with conn.cursor() as cur3:
+                await cur3.execute("SELECT rank FROM users WHERE discord_id = %s", (str(discord_id),))
+                row = await cur3.fetchone()
+                if row:
+                    rank = row[0]
             
             color = rank_colors.get(rank, 0x7289DA)
 
@@ -1091,9 +1094,8 @@ async def auto_post_currently_live():
     
     live_by_rank = {}
     current_live_set = set()
-    live_now = set()
     stream_info = {}
-    
+
     conn = await psycopg.AsyncConnection.connect(POSTGRES_URL)
     async with conn.cursor() as cur:
         await cur.execute("SELECT discord_id, twitch_username, rank FROM users WHERE twitch_username IS NOT NULL")
@@ -1118,7 +1120,6 @@ async def auto_post_currently_live():
                     data = await resp.json()
                     if data.get('data'):
                         stream = data['data'][0]
-                        live_now.add(twitch_username)
                         current_live_set.add(twitch_username)
                         stream_info[twitch_username] = {
                             'game_name': stream.get('game_name', 'Unknown'),
@@ -1128,9 +1129,9 @@ async def auto_post_currently_live():
                         }
             except Exception as e:
                 print(f"Error checking stream status for {twitch_username}: {e}")
-    
+
     await conn.close()
-    
+
     if not live_by_rank:
         return
 
@@ -1152,54 +1153,58 @@ async def auto_post_currently_live():
                         await msg.delete()
                     except Exception:
                         pass
-            
-            # Send new embeds
+
+            # Send new embeds, but only for ranks with at least one currently live stream
             for rank, icon, pts, desc in rank_order:
-                if rank in live_by_rank:
-                    color = rank_colors.get(rank, 0x7289DA)
-                    embed = Embed(
-                        title=f"{icon} Currently Live {rank} Channels",
-                        description=f"{desc}\n",
-                        color=color
+                # Filter only those in this rank who are currently live
+                live_streamers = [
+                    (discord_id, twitch_username)
+                    for discord_id, twitch_username in live_by_rank.get(rank, [])
+                    if twitch_username in current_live_set and twitch_username in stream_info
+                ]
+                if not live_streamers:
+                    continue  # Skip this rank if no one is live
+
+                color = rank_colors.get(rank, 0x7289DA)
+                embed = Embed(
+                    title=f"{icon} Currently Live {rank} Channels",
+                    description=f"{desc}\n",
+                    color=color
+                )
+                embed.set_footer(text=f"Last Updated • {datetime.now(timezone.utc).strftime('%b %d, %Y at %I:%M %p UTC')}")
+
+                for discord_id, twitch_username in live_streamers:
+                    stream = stream_info.get(twitch_username)
+                    if not stream:
+                        continue
+                    game = stream.get("game_name", "Unknown")
+                    viewers = stream.get("viewer_count", "?")
+                    started_at = stream.get("started_at")
+
+                    try:
+                        start_dt = datetime.fromisoformat(started_at.replace("Z", "+00:00"))
+                        now = datetime.now(timezone.utc)
+                        duration = now - start_dt
+                        hours, remainder = divmod(int(duration.total_seconds()), 3600)
+                        minutes = remainder // 60
+                        duration_str = f"{hours}h {minutes}m" if hours > 0 else f"{minutes}m"
+                    except Exception as e:
+                        print(f"Error parsing stream start time for {twitch_username}: {e}")
+                        duration_str = "?"
+
+                    embed.add_field(
+                        name=f"{discord_id}",
+                        value=(
+                            f"**{game}**\n"
+                            f"👁️ {viewers} viewers\n"
+                            f"⏱️ Live for {duration_str}\n"
+                            f"🔗 [Watch here](https://twitch.tv/{twitch_username})"
+                        ),
+                        inline=False
                     )
-                    embed.set_footer(text=f"Last Updated • {datetime.now(timezone.utc).strftime('%b %d, %Y at %I:%M %p UTC')}")
-                    
-                    for discord_id, twitch_username in live_by_rank[rank]:
-                        stream = stream_info.get(twitch_username)
-                        if not stream:
-                            continue
-                        game = stream.get("game_name", "Unknown")
-                        viewers = stream.get("viewer_count", "?")
-                        started_at = stream.get("started_at")
-                        
-                        try:
-                            start_dt = datetime.fromisoformat(started_at.replace("Z", "+00:00"))
-                            now = datetime.now(timezone.utc)
-                            duration = now - start_dt
-                            hours, remainder = divmod(int(duration.total_seconds()), 3600)
-                            minutes = remainder // 60
-                            duration_str = f"{hours}h {minutes}m" if hours > 0 else f"{minutes}m"
-                        except Exception as e:
-                            print(f"Error parsing stream start time for {twitch_username}: {e}")
-                            duration_str = "?"
-                        
 
-                        embed.add_field(
-                            name=f"{discord_id}",
-                            value=(
-                                f"**{game}**\n"
-                                f"👁️ {viewers} viewers\n"
-                                f"⏱️ Live for {duration_str}\n"
-                                f"🔗 [Watch here](https://twitch.tv/{twitch_username})"
-                            ),
-                            inline=False
-                        )
-                    
-                    await channel.send(embed=embed)
-        
-        last_live_set = current_live_set.copy()
+                await channel.send(embed=embed)
 
-        # After processing, update last_live_set
         last_live_set = current_live_set.copy()
 
 # ---- MAIN FUNCTION ---- #
