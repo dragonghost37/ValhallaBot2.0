@@ -1180,6 +1180,7 @@ async def auto_post_currently_live():
                 )
                 embed.set_footer(text=f"Last Updated • {datetime.now(timezone.utc).strftime('%b %d, %Y at %I:%M %p UTC')}")
 
+
                 for discord_id, twitch_username in live_streamers:
                     stream = stream_info.get(twitch_username)
                     if not stream:
@@ -1187,6 +1188,16 @@ async def auto_post_currently_live():
                     game = stream.get("game_name", "Unknown")
                     viewers = stream.get("viewer_count", "?")
                     started_at = stream.get("started_at")
+
+                    # Try to get the display name from the guilds
+                    display_name = None
+                    for guild in bot.guilds:
+                        member = guild.get_member(int(discord_id))
+                        if member:
+                            display_name = member.display_name
+                            break
+                    if not display_name:
+                        display_name = str(discord_id)
 
                     try:
                         start_dt = datetime.fromisoformat(started_at.replace("Z", "+00:00"))
@@ -1200,7 +1211,7 @@ async def auto_post_currently_live():
                         duration_str = "?"
 
                     embed.add_field(
-                        name=f"{discord_id}",
+                        name=f"{display_name}",
                         value=(
                             f"**{game}**\n"
                             f"👁️ {viewers} viewers\n"
