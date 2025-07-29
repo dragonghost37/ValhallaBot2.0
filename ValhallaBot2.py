@@ -3,10 +3,12 @@ import sys
 import time
 import json
 import traceback
+import signal
 
 # --- Added missing imports and definitions --- #
 import asyncio
 import os
+import uuid
 from datetime import datetime, timezone
 from collections import defaultdict, deque
 from typing import Optional, Any, Dict, Set, Deque, DefaultDict, List, Tuple, Callable, Coroutine
@@ -15,6 +17,7 @@ from typing import Optional, Any, Dict, Set, Deque, DefaultDict, List, Tuple, Ca
 # Third-party libraries
 import discord
 from discord.ext import commands, tasks
+from discord import Embed
 import aiohttp
 import asyncpg
 from aiohttp import web
@@ -387,7 +390,6 @@ async def initialize_database():
 @with_retry(RetryConfig(max_attempts=3, base_delay=1.0))
 async def get_all_twitch_users() -> Dict[str, str]:
     """Get all linked Twitch usernames and their Discord IDs from database with validation"""
-    import uuid
     request_id = str(uuid.uuid4())
     if monitoring and hasattr(monitoring, 'performance_monitor'):
         monitoring.performance_monitor.start_request(request_id, "get_all_twitch_users")
@@ -1304,10 +1306,12 @@ async def auto_post_currently_live():
                         if data.get('data'):
                             stream = data['data'][0]
                             live_now.add(twitch_username)
+                            current_live_set.add(twitch_username)
                             stream_info[twitch_username] = {
                                 'game_name': stream.get('game_name', 'Unknown'),
                                 'title': stream.get('title', ''),
-                                'viewer_count': stream.get('viewer_count', 0)
+                                'viewer_count': stream.get('viewer_count', 0),
+                                'started_at': stream.get('started_at', '')
                             }
                 except Exception as e:
                     logger.error(f"Error checking stream status for {twitch_username}: {e}")
@@ -1377,6 +1381,8 @@ async def auto_post_currently_live():
                             )
                         
                         await channel.send(embed=embed)
+            
+            last_live_set = current_live_set.copy()
 
             # After processing, update last_live_set
             last_live_set = current_live_set.copy()
@@ -1392,10 +1398,6 @@ async def shutdown_handler():
             check_live_streams.stop()
         if auto_post_currently_live.is_running():
             auto_post_currently_live.stop()
-        if health_check.is_running():
-            health_check.stop()
-        if cleanup_memory.is_running():
-            cleanup_memory.stop()
         logger.info("✅ Background tasks stopped")
     except Exception as e:
         logger.error(f"Error stopping background tasks: {e}")
@@ -1426,8 +1428,8 @@ async def shutdown_handler():
     
     # Close database pool
     try:
-        if pool:
-            await pool.close()
+        if hasattr(db_manager, 'pool') and db_manager.pool:
+            await db_manager.close_pool()
         logger.info("✅ Database pool closed")
     except Exception as e:
         logger.error(f"Error closing database pool: {e}")
@@ -1452,12 +1454,12 @@ async def main():
     try:
         # Initialize database connection pool
         logger.info("Connecting to database...")
-        await db_manager.initialize(
-            config.database.url,
-            min_size=config.database.pool_min_size,
-            max_size=config.database.pool_max_size,
-            command_timeout=config.database.command_timeout
-        )
+        db_url = getattr(getattr(config, 'database', None), 'url', None) or os.getenv('DATABASE_URL')
+        if not db_url:
+            raise ValueError("Database URL not configured")
+        
+        db_manager.database_url = db_url
+        await db_manager.init_pool()
         pool = db_manager.pool
         
         # Initialize all components
@@ -1466,7 +1468,11 @@ async def main():
         await setup_webhook_server()
         
         # Start Discord bot
-        discord_task = asyncio.create_task(bot.start(config.discord.bot_token))
+        bot_token = getattr(getattr(config, 'discord', None), 'bot_token', None) or os.getenv('DISCORD_BOT_TOKEN')
+        if not bot_token:
+            raise ValueError("Discord bot token not configured")
+        
+        discord_task = asyncio.create_task(bot.start(bot_token))
         
         # Start background tasks
         if not check_live_streams.is_running():

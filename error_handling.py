@@ -1,3 +1,7 @@
+# --- ValidationError for import compatibility --- #
+class ValidationError(Exception):
+    """Raised when input validation fails."""
+    pass
 #!/usr/bin/env python3
 """
 Error handling, retry logic, and database management for ValhallaBot2
