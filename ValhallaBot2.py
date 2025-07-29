@@ -432,28 +432,28 @@ async def check_referral_bonus(conn, discord_id):
         if not user_data:
             return
         points, referral_bonus_claimed, referred_by = user_data
+        # Only proceed if user has a referrer
+        if referred_by is None:
+            return
         # Check if user has reached 400 points and hasn't claimed referral bonus yet
         if points >= 400 and not referral_bonus_claimed:
             # Mark bonus as claimed for this user
             await cur.execute("UPDATE users SET referral_bonus_claimed = TRUE WHERE discord_id = %s", (discord_id,))
-            # Check if they have a referrer
-            referrer_id = referred_by
-            if referrer_id:
-                # Award 200 points to the referrer
-                await cur.execute("UPDATE users SET points = points + 200 WHERE discord_id = %s", (referrer_id,))
-                await update_user_rank(conn, referrer_id)
-                # Notify in bot-commands channel
-                channel = discord.utils.get(bot.get_all_channels(), name="╡bot-commands")
-                if channel:
-                    try:
-                        referrer_user = await bot.fetch_user(int(referrer_id))
-                        referred_user = await bot.fetch_user(int(discord_id))
-                        await channel.send(
-                            f"🎉 **Referral Bonus!** <@{referrer_id}> earned 200 points because "
-                            f"<@{discord_id}> reached 400 points! Thanks for growing our Valhalla community!"
-                        )
-                    except Exception:
-                        pass
+            # Award 200 points to the referrer
+            await cur.execute("UPDATE users SET points = points + 200 WHERE discord_id = %s", (referred_by,))
+            await update_user_rank(conn, referred_by)
+            # Notify in bot-commands channel
+            channel = discord.utils.get(bot.get_all_channels(), name="╡bot-commands")
+            if channel:
+                try:
+                    referrer_user = await bot.fetch_user(int(referred_by))
+                    referred_user = await bot.fetch_user(int(discord_id))
+                    await channel.send(
+                        f"🎉 **Referral Bonus!** <@{referred_by}> earned 200 points because "
+                        f"<@{discord_id}> reached 400 points! Thanks for growing our Valhalla community!"
+                    )
+                except Exception:
+                    pass
 
 async def update_user_rank(conn, discord_id):
     # Get all users sorted by points descending
