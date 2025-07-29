@@ -6,8 +6,8 @@ discord.py==2.3.2
 # Twitch
 twitchio==2.6.0
 
-# Database
-asyncpg==0.29.0
+# Database - Force pre-compiled wheel
+asyncpg==0.28.0
 
 # HTTP Client and Web Server
 aiohttp==3.9.1

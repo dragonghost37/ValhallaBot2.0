@@ -154,6 +154,135 @@ async def initialize_database():
     finally:
         await conn.close()
 
+# ---- DATABASE HELPERS ---- #
+async def get_user_by_discord_id(discord_id):
+    """Get user by Discord ID"""
+    conn = await asyncpg.connect(POSTGRES_URL)
+    try:
+        return await conn.fetchrow("SELECT * FROM users WHERE discord_id = $1", str(discord_id))
+    finally:
+        await conn.close()
+
+async def get_user_by_twitch_username(twitch_username):
+    """Get user by Twitch username"""
+    conn = await asyncpg.connect(POSTGRES_URL)
+    try:
+        return await conn.fetchrow("SELECT * FROM users WHERE twitch_username = $1", twitch_username)
+    finally:
+        await conn.close()
+
+async def create_user(discord_id, twitch_username=None, referred_by=None):
+    """Create a new user"""
+    conn = await asyncpg.connect(POSTGRES_URL)
+    try:
+        await conn.execute(
+            "INSERT INTO users (discord_id, twitch_username, referred_by) VALUES ($1, $2, $3) ON CONFLICT (discord_id) DO NOTHING",
+            str(discord_id), twitch_username, referred_by
+        )
+    finally:
+        await conn.close()
+
+async def link_twitch_account(discord_id, twitch_username):
+    """Link Twitch account to Discord user"""
+    conn = await asyncpg.connect(POSTGRES_URL)
+    try:
+        await conn.execute(
+            "UPDATE users SET twitch_username = $1 WHERE discord_id = $2",
+            twitch_username, str(discord_id)
+        )
+    finally:
+        await conn.close()
+
+async def update_user_points(discord_id=None, twitch_username=None, points_to_add=0):
+    """Update user points by Discord ID or Twitch username"""
+    conn = await asyncpg.connect(POSTGRES_URL)
+    try:
+        if discord_id:
+            await conn.execute(
+                "UPDATE users SET points = points + $1 WHERE discord_id = $2",
+                points_to_add, str(discord_id)
+            )
+        elif twitch_username:
+            await conn.execute(
+                "UPDATE users SET points = points + $1 WHERE twitch_username = $2",
+                points_to_add, twitch_username
+            )
+    finally:
+        await conn.close()
+
+async def get_user_rank(points):
+    """Calculate rank based on points"""
+    if points >= 500:
+        return "Einherjar"
+    elif points >= 200:
+        return "Drengr" 
+    elif points >= 75:
+        return "Huscarl"
+    elif points >= 25:
+        return "Karl"
+    else:
+        return "Thrall"
+
+async def update_user_rank(conn, discord_id):
+    """Update user rank based on current points"""
+    user = await conn.fetchrow("SELECT points FROM users WHERE discord_id = $1", str(discord_id))
+    if user:
+        new_rank = await get_user_rank(user['points'])
+        await conn.execute(
+            "UPDATE users SET rank = $1 WHERE discord_id = $2",
+            new_rank, str(discord_id)
+        )
+
+async def record_chat_point(chatter_id, streamer_id, points_awarded):
+    """Record chat points for analytics"""
+    conn = await asyncpg.connect(POSTGRES_URL)
+    try:
+        await conn.execute(
+            "INSERT INTO chat_points (chatter_id, streamer_id, points_awarded) VALUES ($1, $2, $3)",
+            chatter_id, streamer_id, points_awarded
+        )
+    finally:
+        await conn.close()
+
+async def record_raid(raider_id, target_id):
+    """Record a raid for analytics"""
+    conn = await asyncpg.connect(POSTGRES_URL)
+    try:
+        await conn.execute(
+            "INSERT INTO raids (raider_id, target_id) VALUES ($1, $2)",
+            raider_id, target_id
+        )
+    finally:
+        await conn.close()
+
+async def claim_referral_bonus(discord_id):
+    """Claim referral bonus and award points"""
+    conn = await asyncpg.connect(POSTGRES_URL)
+    try:
+        # Check if user exists and hasn't claimed bonus
+        user = await conn.fetchrow(
+            "SELECT referral_bonus_claimed, referred_by FROM users WHERE discord_id = $1",
+            str(discord_id)
+        )
+        
+        if user and not user['referral_bonus_claimed'] and user['referred_by']:
+            # Award 10 points and mark as claimed
+            await conn.execute(
+                "UPDATE users SET points = points + 10, referral_bonus_claimed = TRUE WHERE discord_id = $1",
+                str(discord_id)
+            )
+            
+            # Award 5 points to referrer
+            await conn.execute(
+                "UPDATE users SET points = points + 5 WHERE discord_id = $1",
+                user['referred_by']
+            )
+            
+            return True
+        return False
+    finally:
+        await conn.close()
+
 # ---- WEBHOOK ROUTES ---- #
 @routes.post("/eventsub")
 async def handle_eventsub(request):
