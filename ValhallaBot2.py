@@ -3,7 +3,7 @@
 import discord
 from discord.ext import commands, tasks
 from discord import app_commands, Embed
-import asyncpg
+import psycopg
 import asyncio
 import os
 import aiohttp
@@ -115,100 +115,102 @@ async def get_twitch_oauth_token():
 # ---- DATABASE INITIALIZATION ---- #
 async def initialize_database():
     """Create database tables with simple schema"""
-    conn = await asyncpg.connect(POSTGRES_URL)
-    try:
-        await conn.execute("""
-        CREATE TABLE IF NOT EXISTS users (
-            discord_id TEXT PRIMARY KEY,
-            twitch_username TEXT,
-            rank TEXT DEFAULT 'Thrall',
-            points INTEGER DEFAULT 0,
-            referral_bonus_claimed BOOLEAN DEFAULT FALSE,
-            referred_by TEXT
-        )
-        """)
-        await conn.execute("""
-        CREATE TABLE IF NOT EXISTS chats (
-            chatter_id TEXT,
-            streamer_id TEXT,
-            count INTEGER DEFAULT 0,
-            PRIMARY KEY (chatter_id, streamer_id)
-        );
-        """)
-        await conn.execute("""
-        CREATE TABLE IF NOT EXISTS raids (
-            raider_id TEXT,
-            target_id TEXT,
-            timestamp TIMESTAMP DEFAULT NOW()
-        );
-        """)
-        await conn.execute("""
-        CREATE TABLE IF NOT EXISTS chat_points (
-            chatter_id TEXT,
-            streamer_id TEXT,
-            points_awarded INTEGER,
-            timestamp TIMESTAMP DEFAULT NOW()
-        );
-        """)
-        print("✅ Database initialized successfully")
-    finally:
-        await conn.close()
+    async with await psycopg.AsyncConnection.connect(POSTGRES_URL) as conn:
+        async with conn.cursor() as cur:
+            await cur.execute("""
+            CREATE TABLE IF NOT EXISTS users (
+                discord_id TEXT PRIMARY KEY,
+                twitch_username TEXT,
+                rank TEXT DEFAULT 'Thrall',
+                points INTEGER DEFAULT 0,
+                referral_bonus_claimed BOOLEAN DEFAULT FALSE,
+                referred_by TEXT
+            )
+            """)
+            await cur.execute("""
+            CREATE TABLE IF NOT EXISTS chats (
+                chatter_id TEXT,
+                streamer_id TEXT,
+                count INTEGER DEFAULT 0,
+                PRIMARY KEY (chatter_id, streamer_id)
+            );
+            """)
+            await cur.execute("""
+            CREATE TABLE IF NOT EXISTS raids (
+                raider_id TEXT,
+                target_id TEXT,
+                timestamp TIMESTAMP DEFAULT NOW()
+            );
+            """)
+            await cur.execute("""
+            CREATE TABLE IF NOT EXISTS chat_points (
+                chatter_id TEXT,
+                streamer_id TEXT,
+                points_awarded INTEGER,
+                timestamp TIMESTAMP DEFAULT NOW()
+            );
+            """)
+            await conn.commit()
+    print("✅ Database initialized successfully")
 
 # ---- DATABASE HELPERS ---- #
 async def get_user_by_discord_id(discord_id):
     """Get user by Discord ID"""
-    conn = await asyncpg.connect(POSTGRES_URL)
-    try:
-        return await conn.fetchrow("SELECT * FROM users WHERE discord_id = $1", str(discord_id))
-    finally:
-        await conn.close()
+    async with await psycopg.AsyncConnection.connect(POSTGRES_URL) as conn:
+        async with conn.cursor() as cur:
+            await cur.execute("SELECT * FROM users WHERE discord_id = %s", (str(discord_id),))
+            result = await cur.fetchone()
+            if result:
+                columns = [desc[0] for desc in cur.description]
+                return dict(zip(columns, result))
+            return None
 
 async def get_user_by_twitch_username(twitch_username):
     """Get user by Twitch username"""
-    conn = await asyncpg.connect(POSTGRES_URL)
-    try:
-        return await conn.fetchrow("SELECT * FROM users WHERE twitch_username = $1", twitch_username)
-    finally:
-        await conn.close()
+    async with await psycopg.AsyncConnection.connect(POSTGRES_URL) as conn:
+        async with conn.cursor() as cur:
+            await cur.execute("SELECT * FROM users WHERE twitch_username = %s", (twitch_username,))
+            result = await cur.fetchone()
+            if result:
+                columns = [desc[0] for desc in cur.description]
+                return dict(zip(columns, result))
+            return None
 
 async def create_user(discord_id, twitch_username=None, referred_by=None):
     """Create a new user"""
-    conn = await asyncpg.connect(POSTGRES_URL)
-    try:
-        await conn.execute(
-            "INSERT INTO users (discord_id, twitch_username, referred_by) VALUES ($1, $2, $3) ON CONFLICT (discord_id) DO NOTHING",
-            str(discord_id), twitch_username, referred_by
-        )
-    finally:
-        await conn.close()
+    async with await psycopg.AsyncConnection.connect(POSTGRES_URL) as conn:
+        async with conn.cursor() as cur:
+            await cur.execute(
+                "INSERT INTO users (discord_id, twitch_username, referred_by) VALUES (%s, %s, %s) ON CONFLICT (discord_id) DO NOTHING",
+                (str(discord_id), twitch_username, referred_by)
+            )
+            await conn.commit()
 
 async def link_twitch_account(discord_id, twitch_username):
     """Link Twitch account to Discord user"""
-    conn = await asyncpg.connect(POSTGRES_URL)
-    try:
-        await conn.execute(
-            "UPDATE users SET twitch_username = $1 WHERE discord_id = $2",
-            twitch_username, str(discord_id)
-        )
-    finally:
-        await conn.close()
+    async with await psycopg.AsyncConnection.connect(POSTGRES_URL) as conn:
+        async with conn.cursor() as cur:
+            await cur.execute(
+                "UPDATE users SET twitch_username = %s WHERE discord_id = %s",
+                (twitch_username, str(discord_id))
+            )
+            await conn.commit()
 
 async def update_user_points(discord_id=None, twitch_username=None, points_to_add=0):
     """Update user points by Discord ID or Twitch username"""
-    conn = await asyncpg.connect(POSTGRES_URL)
-    try:
-        if discord_id:
-            await conn.execute(
-                "UPDATE users SET points = points + $1 WHERE discord_id = $2",
-                points_to_add, str(discord_id)
-            )
-        elif twitch_username:
-            await conn.execute(
-                "UPDATE users SET points = points + $1 WHERE twitch_username = $2",
-                points_to_add, twitch_username
-            )
-    finally:
-        await conn.close()
+    async with await psycopg.AsyncConnection.connect(POSTGRES_URL) as conn:
+        async with conn.cursor() as cur:
+            if discord_id:
+                await cur.execute(
+                    "UPDATE users SET points = points + %s WHERE discord_id = %s",
+                    (points_to_add, str(discord_id))
+                )
+            elif twitch_username:
+                await cur.execute(
+                    "UPDATE users SET points = points + %s WHERE twitch_username = %s",
+                    (points_to_add, twitch_username)
+                )
+            await conn.commit()
 
 async def get_user_rank(points):
     """Calculate rank based on points"""
@@ -225,63 +227,64 @@ async def get_user_rank(points):
 
 async def update_user_rank(conn, discord_id):
     """Update user rank based on current points"""
-    user = await conn.fetchrow("SELECT points FROM users WHERE discord_id = $1", str(discord_id))
-    if user:
-        new_rank = await get_user_rank(user['points'])
-        await conn.execute(
-            "UPDATE users SET rank = $1 WHERE discord_id = $2",
-            new_rank, str(discord_id)
-        )
+    async with conn.cursor() as cur:
+        await cur.execute("SELECT points FROM users WHERE discord_id = %s", (str(discord_id),))
+        result = await cur.fetchone()
+        if result:
+            points = result[0]
+            new_rank = await get_user_rank(points)
+            await cur.execute(
+                "UPDATE users SET rank = %s WHERE discord_id = %s",
+                (new_rank, str(discord_id))
+            )
 
 async def record_chat_point(chatter_id, streamer_id, points_awarded):
     """Record chat points for analytics"""
-    conn = await asyncpg.connect(POSTGRES_URL)
-    try:
-        await conn.execute(
-            "INSERT INTO chat_points (chatter_id, streamer_id, points_awarded) VALUES ($1, $2, $3)",
-            chatter_id, streamer_id, points_awarded
-        )
-    finally:
-        await conn.close()
+    async with await psycopg.AsyncConnection.connect(POSTGRES_URL) as conn:
+        async with conn.cursor() as cur:
+            await cur.execute(
+                "INSERT INTO chat_points (chatter_id, streamer_id, points_awarded) VALUES (%s, %s, %s)",
+                (chatter_id, streamer_id, points_awarded)
+            )
+            await conn.commit()
 
 async def record_raid(raider_id, target_id):
     """Record a raid for analytics"""
-    conn = await asyncpg.connect(POSTGRES_URL)
-    try:
-        await conn.execute(
-            "INSERT INTO raids (raider_id, target_id) VALUES ($1, $2)",
-            raider_id, target_id
-        )
-    finally:
-        await conn.close()
+    async with await psycopg.AsyncConnection.connect(POSTGRES_URL) as conn:
+        async with conn.cursor() as cur:
+            await cur.execute(
+                "INSERT INTO raids (raider_id, target_id) VALUES (%s, %s)",
+                (raider_id, target_id)
+            )
+            await conn.commit()
 
 async def claim_referral_bonus(discord_id):
     """Claim referral bonus and award points"""
-    conn = await asyncpg.connect(POSTGRES_URL)
-    try:
-        # Check if user exists and hasn't claimed bonus
-        user = await conn.fetchrow(
-            "SELECT referral_bonus_claimed, referred_by FROM users WHERE discord_id = $1",
-            str(discord_id)
-        )
-        
-        if user and not user['referral_bonus_claimed'] and user['referred_by']:
-            # Award 10 points and mark as claimed
-            await conn.execute(
-                "UPDATE users SET points = points + 10, referral_bonus_claimed = TRUE WHERE discord_id = $1",
-                str(discord_id)
+    async with await psycopg.AsyncConnection.connect(POSTGRES_URL) as conn:
+        async with conn.cursor() as cur:
+            # Check if user exists and hasn't claimed bonus
+            await cur.execute(
+                "SELECT referral_bonus_claimed, referred_by FROM users WHERE discord_id = %s",
+                (str(discord_id),)
             )
+            result = await cur.fetchone()
             
-            # Award 5 points to referrer
-            await conn.execute(
-                "UPDATE users SET points = points + 5 WHERE discord_id = $1",
-                user['referred_by']
-            )
-            
-            return True
-        return False
-    finally:
-        await conn.close()
+            if result and not result[0] and result[1]:  # not claimed and has referrer
+                # Award 10 points and mark as claimed
+                await cur.execute(
+                    "UPDATE users SET points = points + 10, referral_bonus_claimed = TRUE WHERE discord_id = %s",
+                    (str(discord_id),)
+                )
+                
+                # Award 5 points to referrer
+                await cur.execute(
+                    "UPDATE users SET points = points + 5 WHERE discord_id = %s",
+                    (result[1],)
+                )
+                
+                await conn.commit()
+                return True
+            return False
 
 # ---- WEBHOOK ROUTES ---- #
 @routes.post("/eventsub")

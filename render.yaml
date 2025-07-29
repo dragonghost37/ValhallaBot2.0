@@ -5,7 +5,7 @@ services:
     env: python
     plan: starter
     region: oregon
-    buildCommand: pip install --only-binary=asyncpg -r requirements.txt
+    buildCommand: pip install --only-binary=all --prefer-binary -r requirements.txt
     startCommand: python start.py
     envVars:
       - key: DISCORD_BOT_TOKEN
