@@ -7,7 +7,7 @@ discord.py==2.3.2
 twitchio==2.6.0
 
 # Database - PostgreSQL adapter with Python 3.13 support
-psycopg[binary]==3.1.18
+psycopg[binary]==3.2.9
 
 # HTTP Client and Web Server
 aiohttp==3.9.1

@@ -5,7 +5,7 @@ This script verifies that the bot is running correctly and all systems are opera
 """
 
 import asyncio
-import asyncpg
+import psycopg
 import aiohttp
 import os
 import sys
@@ -63,49 +63,44 @@ class HealthChecker:
             )
     
     async def check_database_connection(self):
-        """Check database connectivity and basic operations."""
+        """Check database connectivity and basic operations using async psycopg."""
         try:
             database_url = os.getenv("DATABASE_URL")
             if not database_url:
                 self.log_check("Database Connection", False, "DATABASE_URL not set")
                 return
-            
-            conn = await asyncpg.connect(database_url)
-            
-            # Test basic query
-            result = await conn.fetchval("SELECT 1")
-            if result == 1:
-                self.log_check("Database Connection", True, "Connection successful")
-            else:
-                self.log_check("Database Connection", False, "Query returned unexpected result")
-                
-            # Check if users table exists
-            table_exists = await conn.fetchval("""
-                SELECT EXISTS (
-                    SELECT FROM information_schema.tables 
-                    WHERE table_schema = 'public' 
-                    AND table_name = 'users'
-                );
-            """)
-            
-            if table_exists:
-                self.log_check("Database Schema", True, "Users table exists")
-                
-                # Test inserting/updating a user (health check user)
-                await conn.execute("""
-                    INSERT INTO users (discord_id, username, points, rank) 
-                    VALUES ($1, $2, $3, $4)
-                    ON CONFLICT (discord_id) 
-                    DO UPDATE SET username = $2
-                """, 999999999999999999, "healthcheck", 0, "Thrall")
-                
-                self.log_check("Database Operations", True, "Insert/update operations working")
-                
-            else:
-                self.log_check("Database Schema", False, "Users table not found")
-            
-            await conn.close()
-            
+            async with await psycopg.AsyncConnection.connect(database_url) as conn:
+                async with conn.cursor() as cur:
+                    # Test basic query
+                    await cur.execute("SELECT 1")
+                    result = await cur.fetchone()
+                    if result and result[0] == 1:
+                        self.log_check("Database Connection", True, "Connection successful")
+                    else:
+                        self.log_check("Database Connection", False, "Query returned unexpected result")
+
+                    # Check if users table exists
+                    await cur.execute("""
+                        SELECT EXISTS (
+                            SELECT FROM information_schema.tables 
+                            WHERE table_schema = 'public' 
+                            AND table_name = 'users'
+                        );
+                    """)
+                    table_exists = await cur.fetchone()
+                    if table_exists and table_exists[0]:
+                        self.log_check("Database Schema", True, "Users table exists")
+                        # Test inserting/updating a user (health check user)
+                        await cur.execute("""
+                            INSERT INTO users (discord_id, username, points, rank) 
+                            VALUES (%s, %s, %s, %s)
+                            ON CONFLICT (discord_id) 
+                            DO UPDATE SET username = EXCLUDED.username
+                        """, (999999999999999999, "healthcheck", 0, "Thrall"))
+                        await conn.commit()
+                        self.log_check("Database Operations", True, "Insert/update operations working")
+                    else:
+                        self.log_check("Database Schema", False, "Users table not found")
         except Exception as e:
             self.log_check("Database Connection", False, f"Error: {str(e)}")
     
