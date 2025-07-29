@@ -5,7 +5,7 @@ services:
     env: python
     plan: starter
     region: oregon
-    buildCommand: chmod +x build.sh && ./build.sh
+    buildCommand: pip install -r requirements.txt
     startCommand: python start.py
     envVars:
       - key: DISCORD_BOT_TOKEN
