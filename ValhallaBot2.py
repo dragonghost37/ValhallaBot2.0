@@ -367,7 +367,7 @@ async def initialize_database():
             await conn.execute(
                 "INSERT INTO audit_log (action, details) VALUES ($1, $2)",
                 "database_initialized",
-                json.dumps({"environment": config.environment, "timestamp": datetime.utcnow().isoformat()})
+                json.dumps({"environment": getattr(config, 'environment', 'production'), "timestamp": datetime.now(timezone.utc).isoformat()})
             )
             
             logger.info("✅ Production database schema initialized successfully")
@@ -769,9 +769,9 @@ async def health_check(request: web.Request) -> web.Response:
         
         return web.json_response({
             "status": overall_health["status"],
-            "timestamp": datetime.utcnow().isoformat(),
+            "timestamp": datetime.now(timezone.utc).isoformat(),
             "version": "2.0.0-production",
-            "environment": config.environment,
+            "environment": getattr(config, 'environment', 'production'),
             "checks": overall_health["checks"]
         }, status=status_code)
         
@@ -779,7 +779,7 @@ async def health_check(request: web.Request) -> web.Response:
         logger.error(f"Health check failed: {e}")
         return web.json_response({
             "status": "error",
-            "timestamp": datetime.utcnow().isoformat(),
+            "timestamp": datetime.now(timezone.utc).isoformat(),
             "error": str(e)
         }, status=503)
 
@@ -790,7 +790,7 @@ async def liveness_probe(request: web.Request) -> web.Response:
         # Basic liveness check - just verify the service is responding
         return web.json_response({
             "status": "alive",
-            "timestamp": datetime.utcnow().isoformat(),
+            "timestamp": datetime.now(timezone.utc).isoformat(),
             "uptime_seconds": time.time() - monitoring.metrics.start_time
         })
     except Exception as e:
@@ -816,7 +816,7 @@ async def readiness_probe(request: web.Request) -> web.Response:
         
         return web.json_response({
             "status": "ready" if all_ready else "not_ready",
-            "timestamp": datetime.utcnow().isoformat(),
+            "timestamp": datetime.now(timezone.utc).isoformat(),
             "checks": checks
         }, status=status_code)
         
@@ -838,7 +838,7 @@ async def status_endpoint(request: web.Request) -> web.Response:
         return web.json_response({
             "service": "ValhallaBot",
             "version": "2.0.0-production",
-            "environment": config.environment,
+            "environment": getattr(config, 'environment', 'production'),
             "status": status_report,
             "security": security_summary,
             "errors": error_summary
