@@ -1,113 +1,43 @@
 #!/usr/bin/env python3
-import sys
-import time
-import json
-import traceback
-import signal
 
-# --- Added missing imports and definitions --- #
-import asyncio
-import os
-import uuid
-from datetime import datetime, timezone
-from collections import defaultdict, deque
-from typing import Optional, Any, Dict, Set, Deque, DefaultDict, List, Tuple, Callable, Coroutine
-
-
-# Third-party libraries
 import discord
 from discord.ext import commands, tasks
-from discord import Embed
-import aiohttp
+from discord import app_commands, Embed
 import asyncpg
+import asyncio
+import os
+import aiohttp
 from aiohttp import web
-
-
-# Project modules
-from config import config
-import db_manager
-import error_handling as error_handler
-import security
-from monitoring import monitoring
-from security import create_security_config, SecurityMiddleware, WebhookSecurity, security_auditor
-from error_handling import ErrorSeverity, ValidationError, APIError, DatabaseError
-from validators import InputValidator
-
-
-# Retry decorator and config (assume defined in error_handling or utils)
-try:
-    from error_handling import with_retry, RetryConfig
-except ImportError:
-    def with_retry(*args, **kwargs):
-        def decorator(f):
-            return f
-        return decorator
-    class RetryConfig:
-        def __init__(self, max_attempts=3, base_delay=1.0):
-            pass
-
-
-# API manager (assume defined in monitoring or elsewhere)
-try:
-    from error_handling import api_manager
-except ImportError:
-    api_manager = None
-
+import json
+from twitchio.ext import commands as twitch_commands
+from datetime import datetime, timezone
 import logging
-log_level = logging.INFO
-# ...existing code...
+import sys
+import time
+import uuid
+import signal
+from typing import Optional, Any, Dict, Set, Deque, DefaultDict, List, Tuple
+from collections import defaultdict, deque
+
+
+# ---- LOGGING SETUP ---- #
 logging.basicConfig(
-    level=log_level,
-    format='%(asctime)s - %(name)s - %(levelname)s - [%(filename)s:%(lineno)d] - %(message)s',
+    level=logging.INFO,
+    format='%(asctime)s - %(name)s - %(levelname)s - %(message)s',
     handlers=[
-        logging.FileHandler('valhallabot.log', encoding='utf-8'),
-        logging.StreamHandler(sys.stdout)
+        logging.StreamHandler(sys.stdout)  # Only stdout for Render
     ]
 )
 logger = logging.getLogger(__name__)
 
-# Suppress noisy third-party loggers only if in production, else let them be
-if getattr(config, 'environment', 'development') == "production":
-    for noisy in ['discord', 'aiohttp', 'asyncpg']:
-        try:
-            logging.getLogger(noisy).setLevel(logging.WARNING)
-        except Exception:
-            pass
-
-logger.info(f"🛡️ ValhallaBot2.py starting up in {getattr(config, 'environment', 'development')} mode...")
-
 # ---- CONFIGURATION ---- #
-
-# Use config module, but do not force exit on validation failure or use protected attributes
-try:
-    validate_env = getattr(config, 'validate_environment', None)
-    if callable(validate_env):
-        validate_env()
-        logger.info("✅ Configuration validated successfully")
-except Exception as e:
-    logger.warning(f"⚠️ Configuration validation failed: {e} (continuing anyway)")
-
-# Initialize security configuration (allow fallback if missing)
-try:
-    security_config = create_security_config()
-    security_middleware = SecurityMiddleware(security_config)
-    webhook_secret = getattr(security_config, 'webhook_secret', 'fallbacksecret')
-    webhook_security = WebhookSecurity(webhook_secret)
-except Exception as e:
-    logger.warning(f"⚠️ Security config failed: {e} (using minimal security)")
-    security_config = None
-    security_middleware = None
-    webhook_security = None
-
-# Initialize database manager (allow fallback if config missing)
-try:
-    db_url = getattr(getattr(config, 'database', None), 'url', None)
-    if db_url:
-        db_manager.database_url = db_url
-    else:
-        logger.warning("⚠️ Database URL missing in config; database features may not work.")
-except Exception as e:
-    logger.warning(f"⚠️ Database config missing: {e}")
+DISCORD_BOT_TOKEN = os.getenv("DISCORD_BOT_TOKEN")
+TWITCH_CLIENT_ID = os.getenv("TWITCH_CLIENT_ID")
+TWITCH_CLIENT_SECRET = os.getenv("TWITCH_CLIENT_SECRET")
+TWITCH_BOT_TOKEN = os.getenv("TWITCH_BOT_TOKEN")
+WEBHOOK_URL = os.getenv("WEBHOOK_URL")
+EVENTSUB_SECRET = os.getenv("EVENTSUB_SECRET", "valhalla_secret")
+POSTGRES_URL = os.getenv("DATABASE_URL")
 
 rank_points = {
     "Thrall": 1,
@@ -145,740 +75,179 @@ bot = commands.Bot(command_prefix="!", intents=intents)
 routes = web.RouteTableDef()
 
 
-# Global variables with type hints
-
-from typing import Set, Dict, Deque, DefaultDict, Any, List, Tuple
-import asyncpg
-pool: Any = None
-twitch_bot_instance = None
-web_app = None
-web_runner = None
+# Global variables
 twitch_token = None
-currently_live: Set[str] = set()
-stream_chat_counts: Dict[str, Dict[str, int]] = {}
-twitch_to_discord: Dict[str, str] = {}
-stream_raids: Dict[str, List[Tuple[str, int, int]]] = {}
-stream_raids_sent: Dict[str, List[Tuple[str, int, int]]] = {}
-last_live_set: Set[str] = set()
+currently_live = set()
+stream_chat_counts = {}
+twitch_to_discord = {}
+stream_raids = {}  # {twitch_username: [ (raider, viewers, points_awarded) ]}
+stream_raids_sent = {}  # Track raids sent by streamers
+last_live_set = set()
 
-# Rate limiting for commands
-user_command_times: DefaultDict[int, Deque[float]] = defaultdict(lambda: deque(maxlen=10))
-
-# ---- RATE LIMITING ---- #
-async def check_rate_limit(user_id: int, max_commands: int = 5, window: int = 60) -> bool:
-    """Simple rate limiting for commands"""
-    now = time.time()
-    user_times = user_command_times[user_id]
+# ---- WEBHOOK SERVER SETUP ---- #
+async def setup_webhook_server():
+    """Setup the webhook server for Twitch EventSub"""
+    app = web.Application()
+    app.router.add_routes(routes)
     
-    # Remove old timestamps
-    while user_times and user_times[0] < now - window:
-        user_times.popleft()
-    
-    if len(user_times) >= max_commands:
-        return False
-    
-    user_times.append(now)
-    return True
+    port = int(os.getenv("PORT", 8000))
+    runner = web.AppRunner(app)
+    await runner.setup()
+    site = web.TCPSite(runner, "0.0.0.0", port)
+    await site.start()
+    print(f"🌐 Webhook server started on port {port}")
+    return runner
 
-# ---- PRODUCTION DATABASE INITIALIZATION ---- #
-@with_retry(RetryConfig(max_attempts=3, base_delay=2.0))
-async def initialize_database():
-    """Create database tables with production-grade schema and security"""
-    logger.info("🗄️ Initializing production database schema...")
-    
-    try:
-        # Use the production database manager
-        conn = await db_manager.get_connection()
-        try:
-            # Step 1: Create users table with basic schema
-            await conn.execute("""
-                CREATE TABLE IF NOT EXISTS users (
-                    discord_id TEXT PRIMARY KEY,
-                    twitch_username TEXT UNIQUE,
-                    rank TEXT DEFAULT 'Thrall',
-                    points INTEGER DEFAULT 0,
-                    created_at TIMESTAMP DEFAULT NOW(),
-                    updated_at TIMESTAMP DEFAULT NOW(),
-                    last_activity TIMESTAMP DEFAULT NOW(),
-                    metadata JSONB DEFAULT '{}'
-                )
-            """)
-            
-            # Step 2: Add missing columns if they don't exist
-            await conn.execute("""
-                DO $$ 
-                BEGIN 
-                    -- Add is_active column if missing
-                    IF NOT EXISTS (SELECT 1 FROM information_schema.columns 
-                                  WHERE table_name = 'users' AND column_name = 'is_active') THEN
-                        ALTER TABLE users ADD COLUMN is_active BOOLEAN DEFAULT TRUE;
-                    END IF;
-                    
-                    -- Add constraints if table already exists
-                    BEGIN
-                        ALTER TABLE users ADD CONSTRAINT check_discord_id CHECK (discord_id ~ '^[0-9]{17,19}$');
-                    EXCEPTION
-                        WHEN duplicate_object THEN NULL;
-                    END;
-                    
-                    BEGIN
-                        ALTER TABLE users ADD CONSTRAINT check_twitch_username CHECK (twitch_username ~ '^[a-zA-Z0-9_]{4,25}$');
-                    EXCEPTION
-                        WHEN duplicate_object THEN NULL;
-                    END;
-                    
-                    BEGIN
-                        ALTER TABLE users ADD CONSTRAINT check_rank CHECK (rank IN ('Thrall', 'Raider', 'Berserker', 'Jarl', 'Chieftain', 'Allfather'));
-                    EXCEPTION
-                        WHEN duplicate_object THEN NULL;
-                    END;
-                    
-                    BEGIN
-                        ALTER TABLE users ADD CONSTRAINT check_points CHECK (points >= 0);
-                    EXCEPTION
-                        WHEN duplicate_object THEN NULL;
-                    END;
-                END $$
-            """)
-            
-            # Step 3: Create other tables
-            await conn.execute("""
-                CREATE TABLE IF NOT EXISTS raids (
-                    id SERIAL PRIMARY KEY,
-                    raider_id TEXT NOT NULL,
-                    target_id TEXT NOT NULL,
-                    viewers INTEGER DEFAULT 0,
-                    points_awarded INTEGER DEFAULT 0,
-                    timestamp TIMESTAMP DEFAULT NOW(),
-                    raid_data JSONB DEFAULT '{}',
-                    processed BOOLEAN DEFAULT FALSE
-                )
-            """)
-            
-            await conn.execute("""
-                CREATE TABLE IF NOT EXISTS chat_points (
-                    id SERIAL PRIMARY KEY,
-                    chatter_id TEXT NOT NULL,
-                    streamer_id TEXT NOT NULL,
-                    points_awarded INTEGER DEFAULT 0,
-                    timestamp TIMESTAMP DEFAULT NOW(),
-                    session_id UUID DEFAULT gen_random_uuid()
-                )
-            """)
-            
-            await conn.execute("""
-                CREATE TABLE IF NOT EXISTS chats (
-                    chatter_id TEXT NOT NULL,
-                    streamer_id TEXT NOT NULL,
-                    count INTEGER DEFAULT 0,
-                    last_chat TIMESTAMP DEFAULT NOW(),
-                    PRIMARY KEY (chatter_id, streamer_id)
-                )
-            """)
-            
-            await conn.execute("""
-                CREATE TABLE IF NOT EXISTS referrals (
-                    id SERIAL PRIMARY KEY,
-                    referrer_id TEXT NOT NULL,
-                    referred_id TEXT NOT NULL,
-                    awarded BOOLEAN DEFAULT FALSE,
-                    points_awarded INTEGER DEFAULT 0,
-                    created_at TIMESTAMP DEFAULT NOW(),
-                    awarded_at TIMESTAMP,
-                    UNIQUE(referrer_id, referred_id)
-                )
-            """)
-            
-            await conn.execute("""
-                CREATE TABLE IF NOT EXISTS audit_log (
-                    id SERIAL PRIMARY KEY,
-                    user_id TEXT,
-                    action TEXT NOT NULL,
-                    details JSONB DEFAULT '{}',
-                    ip_address INET,
-                    user_agent TEXT,
-                    timestamp TIMESTAMP DEFAULT NOW()
-                )
-            """)
-            
-            # Step 4: Create indexes safely
-            indexes = [
-                "CREATE INDEX IF NOT EXISTS idx_users_twitch ON users(twitch_username) WHERE twitch_username IS NOT NULL",
-                "CREATE INDEX IF NOT EXISTS idx_users_created_at ON users(created_at)",
-                "CREATE INDEX IF NOT EXISTS idx_users_last_activity ON users(last_activity)",
-                "CREATE INDEX IF NOT EXISTS idx_raids_timestamp_desc ON raids(timestamp DESC)",
-                "CREATE INDEX IF NOT EXISTS idx_chat_points_timestamp ON chat_points(timestamp DESC)",
-                "CREATE INDEX IF NOT EXISTS idx_audit_log_timestamp ON audit_log(timestamp DESC)"
-            ]
-            
-            for index_sql in indexes:
-                try:
-                    await conn.execute(index_sql)
-                except Exception as idx_error:
-                    logger.warning(f"Index creation failed (non-critical): {idx_error}")
-            
-            # Step 5: Create points index with is_active check
-            try:
-                await conn.execute("""
-                    DO $$ 
-                    BEGIN 
-                        IF EXISTS (SELECT 1 FROM information_schema.columns 
-                                  WHERE table_name = 'users' AND column_name = 'is_active') THEN
-                            CREATE INDEX IF NOT EXISTS idx_users_points_desc ON users(points DESC) WHERE is_active = TRUE;
-                        ELSE
-                            CREATE INDEX IF NOT EXISTS idx_users_points_desc ON users(points DESC);
-                        END IF;
-                    END $$
-                """)
-            except Exception as idx_error:
-                logger.warning(f"Points index creation failed (non-critical): {idx_error}")
-            
-            # Step 6: Create trigger function
-            await conn.execute("""
-                CREATE OR REPLACE FUNCTION update_updated_at_column()
-                RETURNS TRIGGER AS $$
-                BEGIN
-                    NEW.updated_at = NOW();
-                    RETURN NEW;
-                END;
-                $$ language 'plpgsql'
-            """)
-            
-            # Step 7: Create trigger
-            await conn.execute("""
-                DROP TRIGGER IF EXISTS update_users_updated_at ON users;
-                CREATE TRIGGER update_users_updated_at
-                    BEFORE UPDATE ON users
-                    FOR EACH ROW
-                    EXECUTE FUNCTION update_updated_at_column()
-            """)
-            
-            # Step 8: Verify critical tables exist
-            tables_to_verify = ['users', 'raids', 'chat_points', 'chats', 'referrals', 'audit_log']
-            for table in tables_to_verify:
-                result = await conn.fetchval(
-                    "SELECT EXISTS (SELECT FROM information_schema.tables WHERE table_name = $1)",
-                    table
-                )
-                if not result:
-                    raise DatabaseError(f"Failed to create table: {table}")
-            
-            # Step 9: Log audit event
-            await conn.execute(
-                "INSERT INTO audit_log (action, details) VALUES ($1, $2)",
-                "database_initialized",
-                json.dumps({"environment": getattr(config, 'environment', 'production'), "timestamp": datetime.now(timezone.utc).isoformat()})
-            )
-            
-            logger.info("✅ Production database schema initialized successfully")
-            if monitoring and hasattr(monitoring, 'metrics'):
-                monitoring.metrics.increment_counter("database_operations_total", labels={"operation": "initialize", "status": "success"})
-            
-        finally:
-            if hasattr(db_manager, 'pool') and db_manager.pool:
-                await db_manager.pool.release(conn)
-            
-    except Exception as e:
-        logger.error(f"❌ Database initialization failed: {e}")
-        if monitoring and hasattr(monitoring, 'metrics'):
-            monitoring.metrics.increment_counter("database_operations_total", labels={"operation": "initialize", "status": "error"})
-        if error_handler and hasattr(error_handler, 'handle_error'):
-            error_handler.handle_error(e, "database_initialization", severity=ErrorSeverity.CRITICAL)
-        raise DatabaseError(f"Database initialization failed: {e}")
-
-# ---- PRODUCTION TWITCH INTEGRATION ---- #
-@with_retry(RetryConfig(max_attempts=3, base_delay=1.0))
-async def get_all_twitch_users() -> Dict[str, str]:
-    """Get all linked Twitch usernames and their Discord IDs from database with validation"""
-    request_id = str(uuid.uuid4())
-    if monitoring and hasattr(monitoring, 'performance_monitor'):
-        monitoring.performance_monitor.start_request(request_id, "get_all_twitch_users")
-    try:
-        conn = await db_manager.get_connection()
-        try:
-            rows = await conn.fetch(
-                "SELECT twitch_username, discord_id FROM users WHERE twitch_username IS NOT NULL AND is_active = TRUE"
-            )
-            user_map = {}
-            for row in rows:
-                try:
-                    username = InputValidator.validate_twitch_username(row['twitch_username'])
-                    discord_id = InputValidator.validate_discord_id(row['discord_id'])
-                    user_map[username] = discord_id
-                except ValidationError as e:
-                    logger.warning(f"Invalid user in get_all_twitch_users: {e}")
-            if monitoring and hasattr(monitoring, 'metrics'):
-                monitoring.metrics.set_gauge("active_twitch_users", len(user_map))
-            if monitoring and hasattr(monitoring, 'performance_monitor'):
-                monitoring.performance_monitor.end_request(request_id, True)
-            return user_map
-        finally:
-            if hasattr(db_manager, 'pool') and db_manager.pool:
-                await db_manager.pool.release(conn)
-    except Exception as e:
-        logger.error(f"Failed to get Twitch users: {e}")
-        if error_handler and hasattr(error_handler, 'handle_error'):
-            error_handler.handle_error(e, "get_all_twitch_users")
-        if monitoring and hasattr(monitoring, 'performance_monitor'):
-            monitoring.performance_monitor.end_request(request_id, False)
-        return {}
-
-@with_retry(RetryConfig(max_attempts=3, base_delay=2.0))
-async def get_twitch_oauth_token() -> Optional[str]:
-    """Get Twitch OAuth token with secure handling and retry logic"""
+# ---- TWITCH AUTH ---- #
+async def get_twitch_oauth_token():
+    global twitch_token
     url = "https://id.twitch.tv/oauth2/token"
-    
-    # Validate configuration
-    if not config.twitch.client_id or not config.twitch.client_secret:
-        raise APIError("Twitch credentials not configured")
-    
-    data = {
-        'client_id': config.twitch.client_id,
-        'client_secret': config.twitch.client_secret,
+    params = {
+        'client_id': TWITCH_CLIENT_ID,
+        'client_secret': TWITCH_CLIENT_SECRET,
         'grant_type': 'client_credentials'
     }
-    
-    try:
-        response_data = await api_manager.make_request(
-            'POST', 
-            url, 
-            service="twitch_auth",
-            data=data,
-            timeout=config.twitch.api_timeout
-        )
-        
-        if 'access_token' not in response_data:
-            raise APIError("Invalid token response from Twitch")
-        
-        token = response_data['access_token']
-        
-        # Log successful authentication (without exposing token)
-        logger.info("✅ Twitch OAuth token obtained successfully")
-        if monitoring and hasattr(monitoring, 'metrics'):
-            monitoring.metrics.increment_counter("twitch_auth_requests", labels={"status": "success"})
-        
-        return token
-        
-    except Exception as e:
-        logger.error(f"Failed to get Twitch OAuth token: {e}")
-        if monitoring and hasattr(monitoring, 'metrics'):
-            monitoring.metrics.increment_counter("twitch_auth_requests", labels={"status": "error"})
-        if error_handler and hasattr(error_handler, 'handle_error'):
-            error_handler.handle_error(e, "twitch_oauth")
-        raise APIError(f"Twitch authentication failed: {e}")
+    async with aiohttp.ClientSession() as session:
+        async with session.post(url, data=params) as resp:
+            data = await resp.json()
+            twitch_token = data.get('access_token')
 
-@with_retry(RetryConfig(max_attempts=3, base_delay=1.0))
-async def get_twitch_user_id(username: str, twitch_token: str) -> Optional[str]:
-    """Get Twitch user ID with validation and secure handling"""
-    # Validate inputs
+# ---- DATABASE INITIALIZATION ---- #
+async def initialize_database():
+    """Create database tables with simple schema"""
+    conn = await asyncpg.connect(POSTGRES_URL)
     try:
-        validated_username = InputValidator.validate_twitch_username(username)
-    except ValidationError as e:
-        logger.error(f"Invalid Twitch username: {username} - {e}")
-        return None
-    
-    if not twitch_token:
-        raise APIError("Twitch token is required")
-    
-    url = f"https://api.twitch.tv/helix/users?login={validated_username}"
-    headers = {
-        "Client-ID": config.twitch.client_id,
-        "Authorization": f"Bearer {twitch_token}"
-    }
-    
-    try:
-        response_data = await api_manager.make_request(
-            'GET',
-            url,
-            service="twitch_api",
-            headers=headers,
-            timeout=config.twitch.api_timeout
+        await conn.execute("""
+        CREATE TABLE IF NOT EXISTS users (
+            discord_id TEXT PRIMARY KEY,
+            twitch_username TEXT,
+            rank TEXT DEFAULT 'Thrall',
+            points INTEGER DEFAULT 0,
+            referral_bonus_claimed BOOLEAN DEFAULT FALSE,
+            referred_by TEXT
         )
-        
-        if not response_data.get('data'):
-            logger.warning(f"⚠️ User {validated_username} not found on Twitch")
-            if monitoring and hasattr(monitoring, 'metrics'):
-                monitoring.metrics.increment_counter("twitch_user_lookups", labels={"status": "not_found"})
-            return None
-        
-        user_id = response_data['data'][0]['id']
-        
-        # Validate user ID format
-        if not user_id or not user_id.isdigit():
-            raise APIError(f"Invalid user ID received: {user_id}")
-        
-        logger.info(f"✅ Got Twitch user ID for {validated_username}: {user_id}")
-        if monitoring and hasattr(monitoring, 'metrics'):
-            monitoring.metrics.increment_counter("twitch_user_lookups", labels={"status": "success"})
-        return user_id
-        
-    except Exception as e:
-        logger.error(f"❌ Failed to get user ID for {validated_username}: {e}")
-        if monitoring and hasattr(monitoring, 'metrics'):
-            monitoring.metrics.increment_counter("twitch_user_lookups", labels={"status": "error"})
-        if error_handler and hasattr(error_handler, 'handle_error'):
-            error_handler.handle_error(e, f"twitch_user_lookup_{validated_username}")
-        return None
+        """)
+        await conn.execute("""
+        CREATE TABLE IF NOT EXISTS chats (
+            chatter_id TEXT,
+            streamer_id TEXT,
+            count INTEGER DEFAULT 0,
+            PRIMARY KEY (chatter_id, streamer_id)
+        );
+        """)
+        await conn.execute("""
+        CREATE TABLE IF NOT EXISTS raids (
+            raider_id TEXT,
+            target_id TEXT,
+            timestamp TIMESTAMP DEFAULT NOW()
+        );
+        """)
+        await conn.execute("""
+        CREATE TABLE IF NOT EXISTS chat_points (
+            chatter_id TEXT,
+            streamer_id TEXT,
+            points_awarded INTEGER,
+            timestamp TIMESTAMP DEFAULT NOW()
+        );
+        """)
+        print("✅ Database initialized successfully")
+    finally:
+        await conn.close()
 
-@with_retry(RetryConfig(max_attempts=3, base_delay=2.0))
-async def subscribe_to_raid_events(user_id: str, twitch_token: str) -> bool:
-    """Subscribe to raid events with validation and secure handling"""
-    # Validate inputs
-    if not user_id or not user_id.isdigit():
-        raise ValidationError(f"Invalid user ID: {user_id}")
-    
-    if not twitch_token:
-        raise APIError("Twitch token is required")
-    
-    url = "https://api.twitch.tv/helix/eventsub/subscriptions"
-    headers = {
-        "Client-ID": config.twitch.client_id,
-        "Authorization": f"Bearer {twitch_token}",
-        "Content-Type": "application/json"
-    }
-    
-    data = {
-        "type": "channel.raid",
-        "version": "1",
-        "condition": {
-            "to_broadcaster_user_id": user_id
-        },
-        "transport": {
-            "method": "webhook",
-            "callback": config.webhook.url + "/eventsub",
-            "secret": config.twitch.eventsub_secret
-        }
-    }
-    
-    try:
-        response_data = await api_manager.make_request(
-            'POST',
-            url,
-            service="twitch_eventsub",
-            headers=headers,
-            json=data,
-            timeout=config.twitch.api_timeout
-        )
-        
-        logger.info(f"✅ Subscribed to raid events for user {user_id}")
-        if monitoring and hasattr(monitoring, 'metrics'):
-            monitoring.metrics.increment_counter("twitch_subscriptions", labels={"type": "raid", "status": "success"})
-        return True
-        
-    except Exception as e:
-        logger.error(f"❌ Failed to subscribe to raid events for user {user_id}: {e}")
-        if monitoring and hasattr(monitoring, 'metrics'):
-            monitoring.metrics.increment_counter("twitch_subscriptions", labels={"type": "raid", "status": "error"})
-        if error_handler and hasattr(error_handler, 'handle_error'):
-            error_handler.handle_error(e, f"eventsub_subscription_{user_id}")
-        return False     
-
-# ---- PRODUCTION EVENTSUB HANDLER ---- #
+# ---- WEBHOOK ROUTES ---- #
 @routes.post("/eventsub")
-async def handle_eventsub(request: web.Request) -> web.Response:
-    """Handle Twitch EventSub webhooks with security validation"""
-    request_id = str(uuid.uuid4())
-    client_ip = request.headers.get('X-Forwarded-For', request.remote)
-    
-    monitoring.performance_monitor.start_request(request_id, "handle_eventsub")
-    
-    try:
-        # Validate payload size
-        if request.content_length and request.content_length > config.webhook.max_payload_size:
-            logger.warning(f"EventSub payload too large: {request.content_length} bytes from {client_ip}")
-            security_auditor.log_security_event("payload_too_large", client_ip, {"size": request.content_length})
-            monitoring.performance_monitor.end_request(request_id, False)
-            raise web.HTTPRequestEntityTooLarge()
-        
-        # Get raw payload for signature validation
-        raw_payload = await request.read()
-        
-        # Validate webhook signature
-        signature = request.headers.get('Twitch-Eventsub-Message-Signature')
-        if not webhook_security.verify_signature(raw_payload, signature):
-            logger.warning(f"Invalid EventSub signature from {client_ip}")
-            security_auditor.log_security_event("invalid_signature", client_ip, {"endpoint": "/eventsub"})
-            if monitoring and hasattr(monitoring, 'metrics'):
-                monitoring.metrics.increment_counter("webhook_requests", labels={"status": "invalid_signature"})
-            if monitoring and hasattr(monitoring, 'performance_monitor'):
-                monitoring.performance_monitor.end_request(request_id, False)
-            raise web.HTTPForbidden(text="Invalid signature")
-        
-        # Parse JSON payload
-        try:
-            payload = json.loads(raw_payload.decode('utf-8'))
-        except (json.JSONDecodeError, UnicodeDecodeError) as e:
-            logger.error(f"Invalid JSON payload from {client_ip}: {e}")
-            if monitoring and hasattr(monitoring, 'metrics'):
-                monitoring.metrics.increment_counter("webhook_requests", labels={"status": "invalid_json"})
-            if monitoring and hasattr(monitoring, 'performance_monitor'):
-                monitoring.performance_monitor.end_request(request_id, False)
-            raise web.HTTPBadRequest(text="Invalid JSON")
-        
-        # Handle challenge verification
-        if "challenge" in payload:
-            challenge = payload["challenge"]
-            logger.info(f"EventSub challenge received from {client_ip}")
-            if monitoring and hasattr(monitoring, 'metrics'):
-                monitoring.metrics.increment_counter("webhook_requests", labels={"status": "challenge"})
-            if monitoring and hasattr(monitoring, 'performance_monitor'):
-                monitoring.performance_monitor.end_request(request_id, True)
-            return web.Response(text=challenge, content_type="text/plain")
-        
-        # Process raid events
-        if payload.get("subscription", {}).get("type") == "channel.raid":
-            await process_raid_event(payload, client_ip, request_id)
-        else:
-            logger.info(f"Unhandled EventSub type: {payload.get('subscription', {}).get('type')}")
-        
-        if monitoring and hasattr(monitoring, 'metrics'):
-            monitoring.metrics.increment_counter("webhook_requests", labels={"status": "success"})
-        if monitoring and hasattr(monitoring, 'performance_monitor'):
-            monitoring.performance_monitor.end_request(request_id, True)
-        return web.Response(status=200)
-        
-    except web.HTTPException:
-        raise
-    except Exception as e:
-        logger.error(f"EventSub handler error: {e}")
-        if error_handler and hasattr(error_handler, 'handle_error'):
-            error_handler.handle_error(e, "eventsub_handler")
-        if monitoring and hasattr(monitoring, 'metrics'):
-            monitoring.metrics.increment_counter("webhook_requests", labels={"status": "error"})
-        if monitoring and hasattr(monitoring, 'performance_monitor'):
-            monitoring.performance_monitor.end_request(request_id, False)
-        raise web.HTTPInternalServerError()
+async def handle_eventsub(request):
+    payload = await request.json()
+    if "challenge" in payload:
+        return web.Response(text=payload["challenge"])
 
-async def process_raid_event(payload: dict, client_ip: str, request_id: str):
-    """Process raid event with validation and secure database operations"""
-    try:
+    if payload.get("subscription", {}).get("type") == "channel.raid":
         event = payload["event"]
-        
-        # Validate and sanitize event data
-        raider = InputValidator.validate_twitch_username(event["from_broadcaster_user_login"])
-        target = InputValidator.validate_twitch_username(event["to_broadcaster_user_login"])
-        viewers = InputValidator.validate_points(event["viewers"])
-        
-        logger.info(f"Processing raid: {raider} -> {target} ({viewers} viewers)")
-        
-        # Database operations with connection management
-        conn = await db_manager.get_connection()
-        try:
-            # Get user data with validation
-            raider_row = await conn.fetchrow(
-                "SELECT discord_id, points, rank FROM users WHERE twitch_username = $1 AND is_active = TRUE",
-                raider
+        raider = event["from_broadcaster_user_login"].lower()
+        target = event["to_broadcaster_user_login"].lower()
+        viewers = int(event["viewers"])
+
+        conn = await asyncpg.connect(POSTGRES_URL)
+        raider_row = await conn.fetchrow("SELECT discord_id FROM users WHERE twitch_username = $1", raider)
+        target_row = await conn.fetchrow("SELECT discord_id FROM users WHERE twitch_username = $1", target)
+        channel = discord.utils.get(bot.get_all_channels(), name="╡bot-commands")
+        points_awarded = 0
+        raid_count = 0
+        if raider_row and target_row:
+            raider_id = raider_row["discord_id"]
+            target_id = target_row["discord_id"]
+            # Count raids in last 30 days
+            raid_count = await conn.fetchval(
+                "SELECT COUNT(*) FROM raids WHERE raider_id = $1 AND target_id = $2 AND timestamp > NOW() - INTERVAL '30 days'",
+                raider_id, target_id
             )
-            target_row = await conn.fetchrow(
-                "SELECT discord_id, points, rank FROM users WHERE twitch_username = $1 AND is_active = TRUE",
-                target
-            )
-            
-            points_awarded = 0
-            raid_count = 0
-            
-            if raider_row and target_row:
-                raider_id = InputValidator.validate_discord_id(raider_row["discord_id"])
-                target_id = InputValidator.validate_discord_id(target_row["discord_id"])
-                
-                # Check raid frequency (prevent abuse)
-                raid_count = await conn.fetchval(
-                    "SELECT COUNT(*) FROM raids WHERE raider_id = $1 AND target_id = $2 AND timestamp > NOW() - INTERVAL '30 days'",
+            if raid_count >= 5:
+                if channel:
+                    await channel.send(
+                        f"<@{raider_id}> (https://twitch.tv/{raider}) just raided <@{target_id}> (https://twitch.tv/{target}) with {viewers} viewers, "
+                        f"but you have already raided this streamer 5 times in the last 30 days. No points awarded!"
+                    )
+                points_awarded = 0
+            else:
+                points_awarded = viewers * 10
+                await conn.execute("UPDATE users SET points = points + $1 WHERE discord_id = $2", points_awarded, raider_id)
+                await update_user_rank(conn, raider_id)
+                await conn.execute(
+                    "INSERT INTO raids (raider_id, target_id) VALUES ($1, $2)",
                     raider_id, target_id
                 )
-                
-                if raid_count >= 5:
-                    logger.info(f"Raid limit reached for {raider} -> {target} (count: {raid_count})")
-                    points_awarded = 0
-                else:
-                    # Calculate points with validation
-                    points_awarded = min(viewers * 10, 10000)  # Cap at 10k points
-                    
-                    # Update raider points
-                    await conn.execute(
-                        "UPDATE users SET points = points + $1, last_activity = NOW() WHERE discord_id = $2",
-                        points_awarded, raider_id
+                if channel:
+                    await channel.send(
+                        f"<@{raider_id}> (https://twitch.tv/{raider}) just raided <@{target_id}> (https://twitch.tv/{target}) with {viewers} viewers and was awarded {points_awarded} points!\n"
+                        f"You have raided this streamer {raid_count+1}/5 times within the last 30 days."
                     )
-                    
-                    # Update rank
-                    await update_user_rank(conn, raider_id)
-                    
-                    # Record raid
-                    await conn.execute(
-                        "INSERT INTO raids (raider_id, target_id, viewers, points_awarded, raid_data) VALUES ($1, $2, $3, $4, $5)",
-                        raider_id, target_id, viewers, points_awarded, json.dumps({
-                            "raider_username": raider,
-                            "target_username": target,
-                            "client_ip": client_ip,
-                            "request_id": request_id
-                        })
-                    )
-                    
-                    logger.info(f"✅ Raid processed: {raider} earned {points_awarded} points")
-                
-                # Log audit event
-                await conn.execute(
-                    "INSERT INTO audit_log (user_id, action, details, ip_address) VALUES ($1, $2, $3, $4)",
-                    raider_id, "raid_processed", json.dumps({
-                        "target": target,
-                        "viewers": viewers,
-                        "points_awarded": points_awarded,
-                        "raid_count": raid_count
-                    }), client_ip
+        elif raider_row and not target_row:
+            raider_id = raider_row["discord_id"]
+            if channel:
+                await channel.send(
+                    f"<@{raider_id}>: You raided {target} with {viewers} viewers but were NOT awarded {viewers*10} points since they are not a registered streamer in this Discord. "
+                    f"Consider referring them here and earn 200 points once they reach 400 points!"
                 )
-                
-            elif raider_row and not target_row:
-                logger.info(f"Target {target} not found in database for raid from {raider}")
-            elif not raider_row:
-                logger.info(f"Raider {raider} not found in database")
-            
-            # Update metrics
-            if monitoring and hasattr(monitoring, 'metrics'):
-                monitoring.metrics.increment_counter("raids_processed", labels={
-                    "raider_found": str(bool(raider_row)),
-                    "target_found": str(bool(target_row)),
-                    "points_awarded": str(points_awarded > 0)
-                })
-                monitoring.metrics.record_histogram("raid_viewers", viewers)
-                monitoring.metrics.record_histogram("raid_points_awarded", points_awarded)
-            
-        finally:
-            if hasattr(db_manager, 'pool') and db_manager.pool:
-                await db_manager.pool.release(conn)
-            
-    except ValidationError as e:
-        logger.warning(f"Invalid raid event data: {e}")
-        if monitoring and hasattr(monitoring, 'metrics'):
-            monitoring.metrics.increment_counter("raid_validation_errors")
-    except Exception as e:
-        logger.error(f"Error processing raid event: {e}")
-        if error_handler and hasattr(error_handler, 'handle_error'):
-            error_handler.handle_error(e, "process_raid_event")
-        raise
+        # --- Log the raid for the stream summary ---
+        if target not in stream_raids:
+            stream_raids[target] = []
+        stream_raids[target].append((raider, viewers, points_awarded))
+        await conn.close()
+    return web.Response(text="OK")
 
-# ---- PRODUCTION HEALTH CHECK ENDPOINTS ---- #
 @routes.get("/health")
-async def health_check(request: web.Request) -> web.Response:
-    """Basic health check endpoint"""
-    try:
-        # Quick health check
-        health_status = await monitoring.health_checker.run_checks()
-        overall_health = monitoring.health_checker.get_overall_health()
-        
-        status_code = 200 if overall_health["status"] == "healthy" else 503
-        
-        return web.json_response({
-            "status": overall_health["status"],
-            "timestamp": datetime.now(timezone.utc).isoformat(),
-            "version": "2.0.0-production",
-            "environment": getattr(config, 'environment', 'production'),
-            "checks": overall_health["checks"]
-        }, status=status_code)
-        
-    except Exception as e:
-        logger.error(f"Health check failed: {e}")
-        return web.json_response({
-            "status": "error",
-            "timestamp": datetime.now(timezone.utc).isoformat(),
-            "error": str(e)
-        }, status=503)
+async def health_check(request):
+    """Health check endpoint for Render"""
+    return web.Response(
+        text="OK", 
+        status=200,
+        headers={"Content-Type": "text/plain"}
+    )
 
-@routes.get("/health/live")
-async def liveness_probe(request: web.Request) -> web.Response:
-    """Kubernetes liveness probe endpoint"""
+@routes.get("/")
+async def root_handler(request):
+    """Root endpoint to show bot status"""
     try:
-        # Basic liveness check - just verify the service is responding
-        return web.json_response({
-            "status": "alive",
-            "timestamp": datetime.now(timezone.utc).isoformat(),
-            "uptime_seconds": time.time() - monitoring.metrics.start_time
-        })
-    except Exception as e:
-        logger.error(f"Liveness probe failed: {e}")
-        return web.json_response({
-            "status": "dead",
-            "error": str(e)
-        }, status=503)
-
-@routes.get("/health/ready")
-async def readiness_probe(request: web.Request) -> web.Response:
-    """Kubernetes readiness probe endpoint"""
-    try:
-        # Check if service is ready to handle requests
-        checks = {
-            "database": await check_database_ready(),
-            "discord": check_discord_ready(),
-            "twitch": await check_twitch_ready()
+        conn = await asyncpg.connect(POSTGRES_URL)
+        user_count = await conn.fetchval("SELECT COUNT(*) FROM users")
+        await conn.close()
+        
+        status = {
+            "status": "online",
+            "bot_name": "ValhallaBot2",
+            "users_registered": user_count,
+            "discord_connected": bot.is_ready(),
+            "timestamp": datetime.utcnow().isoformat()
         }
-        
-        all_ready = all(checks.values())
-        status_code = 200 if all_ready else 503
-        
-        return web.json_response({
-            "status": "ready" if all_ready else "not_ready",
-            "timestamp": datetime.now(timezone.utc).isoformat(),
-            "checks": checks
-        }, status=status_code)
-        
+        return web.json_response(status)
     except Exception as e:
-        logger.error(f"Readiness probe failed: {e}")
-        return web.json_response({
-            "status": "not_ready",
-            "error": str(e)
-        }, status=503)
-
-@routes.get("/status")
-async def status_endpoint(request: web.Request) -> web.Response:
-    """Comprehensive status endpoint for monitoring"""
-    try:
-        status_report = monitoring.get_status_report() if monitoring and hasattr(monitoring, 'get_status_report') else {}
-        security_summary = security_auditor.get_security_summary() if security_auditor and hasattr(security_auditor, 'get_security_summary') else {}
-        error_summary = error_handler.get_error_summary() if error_handler and hasattr(error_handler, 'get_error_summary') else {}
-        
-        return web.json_response({
-            "service": "ValhallaBot",
-            "version": "2.0.0-production",
-            "environment": getattr(config, 'environment', 'production'),
-            "status": status_report,
-            "security": security_summary,
-            "errors": error_summary
-        })
-        
-    except Exception as e:
-        logger.error(f"Status endpoint failed: {e}")
-        return web.json_response({
-            "error": str(e)
-        }, status=500)
-
-# Health check helper functions
-async def check_database_ready() -> bool:
-    """Check if database is ready"""
-    try:
-        conn = await db_manager.get_connection()
-        try:
-            await conn.fetchval("SELECT 1")
-            return True
-        finally:
-            if hasattr(db_manager, 'pool') and db_manager.pool:
-                await db_manager.pool.release(conn)
-    except Exception:
-        return False
-
-def check_discord_ready() -> bool:
-    """Check if Discord bot is ready"""
-    global bot
-    return bot.is_ready() if 'bot' in globals() else False
-
-async def check_twitch_ready() -> bool:
-    """Check if Twitch integration is ready"""
-    try:
-        token = await get_twitch_oauth_token()
-        return bool(token)
-    except Exception:
-        return False
+        return web.json_response(
+            {"status": "error", "message": str(e)}, 
+            status=500
+        )
 
 # ---- AWARD & RANK FUNCTIONS ---- #
-async def award_chat_points(conn: asyncpg.Connection, chatter_discord_id, streamer_twitch_username, count=1):
+async def award_chat_points(conn, chatter_discord_id, streamer_twitch_username, count=1):
     streamer_row = await conn.fetchrow("SELECT discord_id, rank FROM users WHERE twitch_username = $1", streamer_twitch_username)
     if not streamer_row:
         return
@@ -907,39 +276,81 @@ async def award_chat_points(conn: asyncpg.Connection, chatter_discord_id, stream
         INSERT INTO chat_points (chatter_id, streamer_id, points_awarded, timestamp)
         VALUES ($1, $2, $3, NOW())
     """, chatter_discord_id, streamer_id, points_to_award)
+    
+    # Check for referral bonus milestone
+    await check_referral_bonus(conn, chatter_discord_id)
 
-async def update_user_rank(conn: asyncpg.Connection, discord_id):
+async def check_referral_bonus(conn, discord_id):
+    """Check if user has reached 400 points and award referral bonus to their referrer"""
+    user_data = await conn.fetchrow("SELECT points, referral_bonus_claimed, referred_by FROM users WHERE discord_id = $1", discord_id)
+    if not user_data:
+        return
+    
+    # Check if user has reached 400 points and hasn't claimed referral bonus yet
+    if user_data["points"] >= 400 and not user_data.get("referral_bonus_claimed", False):
+        # Mark bonus as claimed for this user
+        await conn.execute("UPDATE users SET referral_bonus_claimed = TRUE WHERE discord_id = $1", discord_id)
+        
+        # Check if they have a referrer
+        referrer_id = user_data.get("referred_by")
+        if referrer_id:
+            # Award 200 points to the referrer
+            await conn.execute("UPDATE users SET points = points + 200 WHERE discord_id = $1", referrer_id)
+            await update_user_rank(conn, referrer_id)
+            
+            # Notify in bot-commands channel
+            channel = discord.utils.get(bot.get_all_channels(), name="╡bot-commands")
+            if channel:
+                try:
+                    referrer_user = await bot.fetch_user(int(referrer_id))
+                    referred_user = await bot.fetch_user(int(discord_id))
+                    await channel.send(
+                        f"🎉 **Referral Bonus!** <@{referrer_id}> earned 200 points because "
+                        f"<@{discord_id}> reached 400 points! Thanks for growing our Valhalla community!"
+                    )
+                except Exception:
+                    pass
+
+async def update_user_rank(conn, discord_id):
     # Get all users sorted by points descending
     users = await conn.fetch("SELECT discord_id, points FROM users ORDER BY points DESC")
     total_users = len(users)
     if total_users == 0:
         return
 
-    # Find this user's index in the sorted list (0-based)
-    user_index = next((i for i, u in enumerate(users) if u["discord_id"] == str(discord_id)), None)
-    if user_index is None:
+    # Find this user's position (1-based)
+    user_points = None
+    user_rank_index = None
+    for idx, user in enumerate(users):
+        if user["discord_id"] == str(discord_id):
+            user_points = user["points"]
+            user_rank_index = idx + 1
+            break
+    if user_points is None:
         return
-    percentile = user_index / total_users
 
-    row = await conn.fetchrow("SELECT rank FROM users WHERE discord_id = $1", str(discord_id))
-    old_rank = row["rank"] if row else "Thrall"
+    old_rank_row = await conn.fetchrow("SELECT rank FROM users WHERE discord_id = $1", discord_id)
+    old_rank = old_rank_row["rank"] if old_rank_row else "Thrall"
 
-    if percentile < 0.05:
-        new_rank = "Allfather"
-    elif percentile < 0.15:
-        new_rank = "Chieftain"
-    elif percentile < 0.30:
-        new_rank = "Jarl"
-    elif percentile < 0.50:
-        new_rank = "Berserker"
-    elif percentile < 0.80:
-        new_rank = "Raider"
+    # Calculate percentiles
+    percentile = user_rank_index / total_users
+
+    if percentile <= 0.05:
+        new_rank = "Allfather"          # Top 5%
+    elif percentile <= 0.15:
+        new_rank = "Chieftain"          # Top 5–15%
+    elif percentile <= 0.30:
+        new_rank = "Jarl"               # Top 15–30%
+    elif percentile <= 0.50:
+        new_rank = "Berserker"          # Top 30–50%
+    elif percentile <= 0.80:
+        new_rank = "Raider"             # Top 50–80%
     else:
-        new_rank = "Thrall"
+        new_rank = "Thrall"             # Bottom 20%
 
     if new_rank != old_rank:
         await conn.execute("UPDATE users SET rank = $1 WHERE discord_id = $2", new_rank, discord_id)
-        # Notify in bot-commands
+        # Notify in ╡bot-commands
         channel = discord.utils.get(bot.get_all_channels(), name="╡bot-commands")
         if channel:
             rank_order = ["Thrall", "Raider", "Berserker", "Jarl", "Chieftain", "Allfather"]
@@ -978,39 +389,301 @@ async def update_user_rank(conn: asyncpg.Connection, discord_id):
             except Exception:
                 pass
 
-    # Check for referral reward
-    points_row = await conn.fetchrow("SELECT points FROM users WHERE discord_id = $1", discord_id)
-    if points_row and points_row["points"] >= 300:
-        # Find referrer who hasn't been awarded yet
-        referral = await conn.fetchrow(
-            "SELECT referrer_id FROM referrals WHERE referred_id = $1 AND awarded = FALSE",
-            discord_id
+# ---- SLASH COMMANDS ---- #
+@bot.tree.command(name="linktwitch", description="Link your Discord to your Twitch account")
+@app_commands.describe(twitch_username="Your Twitch username")
+async def linktwitch_slash(interaction: discord.Interaction, twitch_username: str):
+    if interaction.channel is None or interaction.channel.name != "╡valhallabot-link":
+        await interaction.response.send_message(
+            "❌ You can only use this command in the ╡valhallabot-link channel.",
+            ephemeral=True
         )
-        if referral:
-            referrer_id = referral["referrer_id"]
-            await conn.execute("UPDATE users SET points = points + 200 WHERE discord_id = $1", referrer_id)
-            await conn.execute("UPDATE referrals SET awarded = TRUE WHERE referrer_id = $1 AND referred_id = $2", referrer_id, discord_id)
-            # Notify the referrer
-            channel = discord.utils.get(bot.get_all_channels(), name="╡bot-commands")
-            if channel:
-                await channel.send(f"🎉 <@{referrer_id}> has been awarded 200 points for referring <@{discord_id}> (who reached 300 points)!")
+        return
+    discord_id = str(interaction.user.id)
+    twitch_username = twitch_username.lower()
+    conn = await asyncpg.connect(POSTGRES_URL)
+    
+    # Check if user already exists and has Twitch linked
+    existing_user = await conn.fetchrow("SELECT twitch_username, points FROM users WHERE discord_id = $1", discord_id)
+    is_first_link = not existing_user or existing_user["twitch_username"] is None
+    
+    # Award 100 points bonus for first-time Twitch linking
+    bonus_points = 100 if is_first_link else 0
+    
+    await conn.execute(
+        """
+        INSERT INTO users (discord_id, twitch_username, rank, points)
+        VALUES ($1, $2, 'Thrall', $3)
+        ON CONFLICT (discord_id) DO UPDATE SET 
+            twitch_username = $2,
+            points = CASE 
+                WHEN users.twitch_username IS NULL THEN users.points + $3
+                ELSE users.points
+            END
+        """,
+        discord_id, twitch_username, bonus_points
+    )
+    
+    # Update user rank after points change
+    if is_first_link:
+        await update_user_rank(conn, discord_id)
+        await check_referral_bonus(conn, discord_id)
+    
+    await conn.close()
+    twitch_to_discord[twitch_username] = discord_id
+    
+    if is_first_link and bonus_points > 0:
+        await interaction.response.send_message(
+            f"✅ {interaction.user.mention}, your Twitch username `{twitch_username}` has been linked!\n"
+            f"🎉 **Welcome Bonus**: You earned {bonus_points} points for linking your Twitch account!",
+            ephemeral=True
+        )
+    else:
+        await interaction.response.send_message(
+            f"✅ {interaction.user.mention}, your Twitch username `{twitch_username}` has been updated!",
+            ephemeral=True
+        )
 
-async def log_chat(chatter_discord_id, streamer_discord_id):
-    async with pool.acquire() as conn:
-        await conn.execute("""
-            INSERT INTO chats (chatter_id, streamer_id, count)
-            VALUES ($1, $2, 1)
-            ON CONFLICT (chatter_id, streamer_id) DO UPDATE SET count = chats.count + 1
-        """, chatter_discord_id, streamer_discord_id)
+@bot.tree.command(name="rank", description="Show your current Valhalla rank")
+async def rank_slash(interaction: discord.Interaction):
+    conn = await asyncpg.connect(POSTGRES_URL)
+    row = await conn.fetchrow("SELECT rank FROM users WHERE discord_id = $1", str(interaction.user.id))
+    await conn.close()
+    if row:
+        rank = row["rank"]
+        icon = rank_icons.get(rank, "")
+        await interaction.response.send_message(f"🏅 {interaction.user.mention}, your current rank is {icon} **{rank}**.", ephemeral=True)
+    else:
+        await interaction.response.send_message("❌ You haven't linked your Twitch yet.", ephemeral=True)
 
-# ---- TWITCH BOT INTEGRATION ---- #
-from twitchio.ext import commands as twitch_commands
+@bot.tree.command(name="mypoints", description="Show your current points and rank")
+async def mypoints_slash(interaction: discord.Interaction):
+    conn = await asyncpg.connect(POSTGRES_URL)
+    row = await conn.fetchrow("SELECT points, rank FROM users WHERE discord_id = $1", str(interaction.user.id))
+    await conn.close()
+    if row:
+        points = row["points"]
+        rank = row["rank"]
+        await interaction.response.send_message(f"💰 {interaction.user.mention}, you have **{points}** points and your rank is **{rank}**.", ephemeral=True)
+    else:
+        await interaction.response.send_message("❌ You haven't linked your Twitch yet.", ephemeral=True)
 
-# ---- TWITCH BOT INTEGRATION ---- #
+@bot.tree.command(name="leaderboard", description="Show the top 50 warriors")
+async def leaderboard_slash(interaction: discord.Interaction):
+    conn = await asyncpg.connect(POSTGRES_URL)
+    rows = await conn.fetch("SELECT discord_id, rank, points FROM users ORDER BY points DESC LIMIT 50")
+    await conn.close()
+    if not rows:
+        await interaction.response.send_message("📉 No leaderboard data yet.", ephemeral=True)
+        return
+    msg = "🏆 Valhalla's Mightiest Warriors 🏆\n"
+    for i, row in enumerate(rows, 1):
+        discord_id = row["discord_id"]
+        rank = row["rank"]
+        points = row["points"]
+        name = f"User({discord_id})"
+        for guild in bot.guilds:
+            member = guild.get_member(int(discord_id))
+            if member:
+                name = member.display_name
+                break
+        icon = rank_icons.get(rank, "")
+        msg += f"{i}. {icon} {name} | {rank} | {points} pts\n"
+    await interaction.response.send_message(msg, ephemeral=True)
+
+@bot.tree.command(name="stats", description="Show your Valhalla Warrior stats")
+async def stats_slash(interaction: discord.Interaction):
+    discord_id = str(interaction.user.id)
+    conn = await asyncpg.connect(POSTGRES_URL)
+    row = await conn.fetchrow("SELECT rank FROM users WHERE discord_id = $1", discord_id)
+    rank = row["rank"] if row else "Thrall"
+    color = rank_colors.get(rank, 0x7289DA)
+
+    # Top 3 members you support
+    rows = await conn.fetch("""
+        SELECT streamer_id, count FROM chats
+        WHERE chatter_id = $1
+        ORDER BY count DESC
+        LIMIT 3
+    """, discord_id)
+    support_list = []
+    for row in rows:
+        name = f"User({row['streamer_id']})"
+        for guild in bot.guilds:
+            member = guild.get_member(int(row['streamer_id']))
+            if member:
+                name = member.display_name
+                break
+        support_list.append(f"{name} ({row['count']} chats)")
+
+    # Top 3 members supporting you
+    rows = await conn.fetch("""
+        SELECT chatter_id, count FROM chats
+        WHERE streamer_id = $1
+        ORDER BY count DESC
+        LIMIT 3
+    """, discord_id)
+    supporter_list = []
+    for row in rows:
+        name = f"User({row['chatter_id']})"
+        for guild in bot.guilds:
+            member = guild.get_member(int(row['chatter_id']))
+            if member:
+                name = member.display_name
+                break
+        supporter_list.append(f"{name} ({row['count']} chats)")
+
+    await conn.close()
+
+    embed = discord.Embed(
+        title=f"{interaction.user.display_name}'s Valhalla Warrior Stats",
+        color=color,
+        description="Here's a summary of your Valhalla Warrior stats:"
+    )
+    embed.add_field(
+        name="Top 3 Members You Support",
+        value="\n".join(support_list) if support_list else "No data.",
+        inline=False
+    )
+    embed.add_field(
+        name="Top 3 Members Supporting You",
+        value="\n".join(supporter_list) if supporter_list else "No data.",
+        inline=False
+    )
+    
+    embed.timestamp = datetime.now(timezone.utc)
+    await interaction.response.send_message(embed=embed, ephemeral=True)
+
+@bot.tree.command(name="help", description="Show all ValhallaBot commands")
+async def help_slash(interaction: discord.Interaction):
+    embed = discord.Embed(
+        title="ValhallaBot Command Picker",
+        description="Here are the available commands:",
+        color=0x7289DA
+    )
+    embed.add_field(name="/linktwitch <twitch_username>", value="Link your Discord to your Twitch account.", inline=False)
+    embed.add_field(name="/refer <@user>", value="Refer someone who just joined the server (earn 200 pts when they reach 400 pts).", inline=False)
+    embed.add_field(name="/rank", value="Show your current Valhalla rank.", inline=False)
+    embed.add_field(name="/mypoints", value="Show your current points and rank.", inline=False)
+    embed.add_field(name="/leaderboard", value="Show top 50 warriors.", inline=False)
+    embed.add_field(name="/stats", value="Show your Valhalla Warrior stats.", inline=False)
+    await interaction.response.send_message(embed=embed, ephemeral=True)
+
+@bot.tree.command(name="howtouse", description="Show how to use ValhallaBot")
+async def how_to_use_slash(interaction: discord.Interaction):
+    embed = discord.Embed(
+        title="⚔️ HOW TO USE VALHALLABOT",
+        description="Your path to glory in the Valhalla Gaming Discord",
+        color=0xFFD700
+    )
+
+    embed.add_field(
+        name="🧩 Step 1: Link Your Twitch",
+        value="Use `/linktwitch <your_twitch_username>` to connect your Discord and Twitch.\n> Example: `/linktwitch odinstreams`\n> 🎁 **Bonus**: Get 100 points for your first link!",
+        inline=False
+    )
+
+    embed.add_field(
+        name="🗡️ Step 2: Earn Points",
+        value="• 💬 Chat in Valhalla streams (up to 100 pts/streamer every 48h)\n"
+              "• ⚔️ Raid Valhalla members (10 pts per viewer, up to 5x/month per target)\n"
+              "• 🤝 Refer new members (200 pts when they reach 400 pts)",
+        inline=False
+    )
+
+    embed.add_field(
+        name="📈 Step 3: Climb the Ranks",
+        value="Ranks auto-update based on your percentile:\n"
+              "• 🦾 Allfather – Top 5%\n"
+              "• 🛡️ Chieftain – 5–15%\n"
+              "• 🦅 Jarl – 15–30%\n"
+              "• 🐺 Berserker – 30–50%\n"
+              "• 🛶 Raider – 50–80%\n"
+              "• 🪓 Thrall – Bottom 20%",
+        inline=False
+    )
+
+    embed.add_field(
+        name="🔍 Commands",
+        value="• `/linktwitch` – Connect your Twitch (100 pt bonus!)\n"
+              "• `/refer @user` – Refer new members (200 pt bonus!)\n"
+              "• `/rank` – Show your rank\n"
+              "• `/mypoints` – View your points\n"
+              "• `/leaderboard` – Top 50 warriors\n"
+              "• `/stats` – See your support stats\n"
+              "• `/help` – Full command list",
+        inline=False
+    )
+
+    embed.add_field(
+        name="📣 Going Live?",
+        value="ValhallaBot will post in **#now-live** when you stream — game, viewers, rank, and link!",
+        inline=False
+    )
+
+    embed.set_footer(text="🛡️ Fight. Raid. Rank up. Valhalla is watching.")
+    embed.timestamp = datetime.utcnow()
+
+    await interaction.response.send_message(embed=embed, ephemeral=True)
+
+@bot.tree.command(name="refer", description="Refer someone who just joined the server")
+@app_commands.describe(user="The Discord user you referred to this server")
+async def refer_slash(interaction: discord.Interaction, user: discord.Member):
+    # Make sure the command is used in the right channel
+    if interaction.channel is None or interaction.channel.name != "╡valhallabot-link":
+        await interaction.response.send_message(
+            "❌ You can only use this command in the ╡valhallabot-link channel.",
+            ephemeral=True
+        )
+        return
+    
+    referrer_id = str(interaction.user.id)
+    referred_id = str(user.id)
+    
+    # Can't refer yourself
+    if referrer_id == referred_id:
+        await interaction.response.send_message("❌ You can't refer yourself!", ephemeral=True)
+        return
+    
+    conn = await asyncpg.connect(POSTGRES_URL)
+    
+    # Check if referrer exists and has linked Twitch
+    referrer_data = await conn.fetchrow("SELECT twitch_username FROM users WHERE discord_id = $1", referrer_id)
+    if not referrer_data or not referrer_data["twitch_username"]:
+        await conn.close()
+        await interaction.response.send_message("❌ You must link your Twitch account first before referring others!", ephemeral=True)
+        return
+    
+    # Check if referred user already exists
+    referred_data = await conn.fetchrow("SELECT referred_by FROM users WHERE discord_id = $1", referred_id)
+    if referred_data:
+        if referred_data["referred_by"]:
+            await conn.close()
+            await interaction.response.send_message(f"❌ {user.mention} was already referred by someone else!", ephemeral=True)
+            return
+        else:
+            # User exists but has no referrer, set the referrer
+            await conn.execute("UPDATE users SET referred_by = $1 WHERE discord_id = $2", referrer_id, referred_id)
+    else:
+        # Create new user entry with referrer
+        await conn.execute(
+            "INSERT INTO users (discord_id, rank, points, referred_by) VALUES ($1, 'Thrall', 0, $2)",
+            referred_id, referrer_id
+        )
+    
+    await conn.close()
+    
+    await interaction.response.send_message(
+        f"✅ {interaction.user.mention} has referred {user.mention}! 🎉\n"
+        f"When {user.mention} reaches 400 points, you'll earn a 200 point referral bonus!",
+        ephemeral=False
+    )
+
+# ---- TWITCH BOT ---- #
 class TwitchBot(twitch_commands.Bot):
-    def __init__(self, token, chat_counts, user_map, channels):
+    def __init__(self, chat_counts, user_map, channels):
         super().__init__(
-            token=token,
+            token=TWITCH_BOT_TOKEN,
             prefix="!",
             initial_channels=[]
         )
@@ -1019,15 +692,11 @@ class TwitchBot(twitch_commands.Bot):
         self.channels_to_join = channels
 
     async def event_ready(self):
-        logger.info(f"TwitchBot connected as {self.nick}")
+        print(f"TwitchBot connected as {self.nick}")
         try:
-            # Join all channels in the list, and rejoin if disconnected
-            for channel in self.channels_to_join:
-                if channel not in [c.name for c in self.connected_channels]:
-                    await self.join_channels([channel])
-            logger.info(f"TwitchBot joined channels: {self.channels_to_join}")
+            await self.join_channels(self.channels_to_join)
         except Exception as e:
-            logger.exception("Error joining Twitch channels:")
+            logging.exception("Error joining Twitch channels:")
 
     async def event_message(self, message):
         if message.echo:
@@ -1046,23 +715,13 @@ class TwitchBot(twitch_commands.Bot):
             await log_chat(discord_chatter, discord_streamer)
 
 async def log_chat(chatter_discord_id, streamer_discord_id):
-    async with pool.acquire() as conn:
-        await conn.execute("""
-            INSERT INTO chats (chatter_id, streamer_id, count)
-            VALUES ($1, $2, 1)
-            ON CONFLICT (chatter_id, streamer_id) DO UPDATE SET count = chats.count + 1
-        """, chatter_discord_id, streamer_discord_id)
-
-async def setup_webhook_server():
-    global web_app, web_runner
-    logger.info("Setting up webhook server...")
-    web_app = web.Application(middlewares=[security_middleware] if security_middleware else [])
-    web_app.add_routes(routes)
-    web_runner = web.AppRunner(web_app)
-    await web_runner.setup()
-    site = web.TCPSite(web_runner, '0.0.0.0', 8080)
-    await site.start()
-    logger.info("✅ Webhook server started on port 8080")
+    conn = await asyncpg.connect(POSTGRES_URL)
+    await conn.execute("""
+        INSERT INTO chats (chatter_id, streamer_id, count)
+        VALUES ($1, $2, 1)
+        ON CONFLICT (chatter_id, streamer_id) DO UPDATE SET count = chats.count + 1
+    """, chatter_discord_id, streamer_discord_id)
+    await conn.close()
 
 # ---- BACKGROUND TASKS ---- #
 @tasks.loop(minutes=1)
@@ -1077,54 +736,54 @@ async def check_live_streams():
     live_now = set()
     stream_info = {}
 
-    async with pool.acquire() as conn:
-        users = await conn.fetch("SELECT discord_id, twitch_username FROM users WHERE twitch_username IS NOT NULL")
+    conn = await asyncpg.connect(POSTGRES_URL)
+    users = await conn.fetch("SELECT discord_id, twitch_username FROM users WHERE twitch_username IS NOT NULL")
+    for user in users:
+        twitch_username = user["twitch_username"]
+        twitch_to_discord[twitch_username] = user["discord_id"]
+
+    async with aiohttp.ClientSession() as session:
+        headers = {
+            'Client-ID': TWITCH_CLIENT_ID,
+            'Authorization': f'Bearer {twitch_token}'
+        }
+
         for user in users:
             twitch_username = user["twitch_username"]
-            twitch_to_discord[twitch_username] = user["discord_id"]
-
-        async with aiohttp.ClientSession() as session:
-            headers = {
-                'Client-ID': config.twitch.client_id,
-                'Authorization': f'Bearer {twitch_token}'
-            }
-
-            for user in users:
-                twitch_username = user["twitch_username"]
-                url = f"https://api.twitch.tv/helix/streams?user_login={twitch_username}"
-                try:
-                    async with session.get(url, headers=headers) as resp:
-                        if resp.status == 401:
-                            # Token expired, refresh and retry once
-                            logger.warning("Twitch token expired, refreshing...")
-                            new_token = await get_twitch_oauth_token()
-                            if new_token:
-                                globals()['twitch_token'] = new_token
-                                headers['Authorization'] = f'Bearer {new_token}'
-                                async with session.get(url, headers=headers) as resp2:
-                                    data = await resp2.json()
-                                    if data.get('data'):
-                                        stream = data['data'][0]
-                                        live_now.add(twitch_username)
-                                        stream_info[twitch_username] = {
-                                            'game_name': stream.get('game_name', 'Unknown'),
-                                            'title': stream.get('title', ''),
-                                            'viewer_count': stream.get('viewer_count', 0)
-                                        }
-                            else:
-                                logger.error("Failed to refresh Twitch token.")
+            url = f"https://api.twitch.tv/helix/streams?user_login={twitch_username}"
+            try:
+                async with session.get(url, headers=headers) as resp:
+                    if resp.status == 401:
+                        # Token expired, refresh and retry once
+                        print("Twitch token expired, refreshing...")
+                        new_token = await get_twitch_oauth_token()
+                        if new_token:
+                            globals()['twitch_token'] = new_token
+                            headers['Authorization'] = f'Bearer {new_token}'
+                            async with session.get(url, headers=headers) as resp2:
+                                data = await resp2.json()
+                                if data.get('data'):
+                                    stream = data['data'][0]
+                                    live_now.add(twitch_username)
+                                    stream_info[twitch_username] = {
+                                        'game_name': stream.get('game_name', 'Unknown'),
+                                        'title': stream.get('title', ''),
+                                        'viewer_count': stream.get('viewer_count', 0)
+                                    }
                         else:
-                            data = await resp.json()
-                            if data.get('data'):
-                                stream = data['data'][0]
-                                live_now.add(twitch_username)
-                                stream_info[twitch_username] = {
-                                    'game_name': stream.get('game_name', 'Unknown'),
-                                    'title': stream.get('title', ''),
-                                    'viewer_count': stream.get('viewer_count', 0)
-                                }
-                except Exception as e:
-                    logger.error(f"Error checking stream status for {twitch_username}: {e}")
+                            print("Failed to refresh Twitch token.")
+                    else:
+                        data = await resp.json()
+                        if data.get('data'):
+                            stream = data['data'][0]
+                            live_now.add(twitch_username)
+                            stream_info[twitch_username] = {
+                                'game_name': stream.get('game_name', 'Unknown'),
+                                'title': stream.get('title', ''),
+                                'viewer_count': stream.get('viewer_count', 0)
+                            }
+            except Exception as e:
+                print(f"Error checking stream status for {twitch_username}: {e}")
 
     # Handle newly live streams
     newly_live = live_now - currently_live
@@ -1145,9 +804,8 @@ async def check_live_streams():
                 except:
                     continue
 
-            async with pool.acquire() as conn:
-                row = await conn.fetchrow("SELECT rank FROM users WHERE discord_id = $1", str(discord_id))
-                rank = row["rank"] if row else "Unknown"
+            row = await conn.fetchrow("SELECT rank FROM users WHERE discord_id = $1", str(discord_id))
+            rank = row["rank"] if row else "Unknown"
 
             color = rank_colors.get(rank, 0x7289DA)
             embed = discord.Embed(
@@ -1169,7 +827,7 @@ async def check_live_streams():
         discord_id = twitch_to_discord.get(twitch_username)
         chatters = stream_chat_counts.get(twitch_username, {})
         total_chats = sum(chatters.values())
-        channel = discord.utils.get(bot.get_all_channels(), name="╡bot-commands")
+        channel = discord.utils.get(bot.get_all_channels(), name="╡stream-summaries")
         if channel and discord_id:
             # Get streamer display name and rank
             streamer_name = twitch_username
@@ -1181,10 +839,9 @@ async def check_live_streams():
                     break
             
             # Fetch rank from DB
-            async with pool.acquire() as conn:
-                row = await conn.fetchrow("SELECT rank FROM users WHERE discord_id = $1", str(discord_id))
-                if row:
-                    rank = row["rank"]
+            row = await conn.fetchrow("SELECT rank FROM users WHERE discord_id = $1", str(discord_id))
+            if row:
+                rank = row["rank"]
             
             color = rank_colors.get(rank, 0x7289DA)
 
@@ -1196,15 +853,16 @@ async def check_live_streams():
                 target_mention = f"<@{target_id}>" if target_id else target
                 streamer_url = f"https://twitch.tv/{twitch_username}"
                 target_url = f"https://twitch.tv/{target}"
-                if points == 0:
-                    await channel.send(
-                        f"{streamer_mention}: You raided {target_mention} ({target_url}) with {viewers} viewers but were **NOT** awarded {viewers*10} points since they are not a registered streamer in this Discord. "
-                        "Consider referring them here and earn 200 points once they reach 300 points!"
-                    )
-                else:
-                    await channel.send(
-                        f"{streamer_mention} ({streamer_url}) just raided {target_mention} ({target_url}) with {viewers} viewers and was awarded {points} points!"
-                    )
+                if channel:
+                    if points == 0:
+                        await channel.send(
+                            f"{streamer_mention}: You raided {target_mention} ({target_url}) with {viewers} viewers but were **NOT** awarded {viewers*10} points since they are not a registered streamer in this Discord. "
+                            "Consider referring them here and earn 200 points once they reach 400 points!"
+                        )
+                    else:
+                        await channel.send(
+                            f"{streamer_mention} ({streamer_url}) just raided {target_mention} ({target_url}) with {viewers} viewers and was awarded {points} points!"
+                        )
 
             # Build stream summary embed
             embed = discord.Embed(
@@ -1262,12 +920,12 @@ async def check_live_streams():
             await channel.send(embed=embed)
 
             # Award chat points based on post-stream chat counts
-            async with pool.acquire() as conn:
-                for chatter_id, count in chatters.items():
-                    await award_chat_points(conn, chatter_id, twitch_username, count)
+            for chatter_id, count in chatters.items():
+                await award_chat_points(conn, chatter_id, twitch_username, count)
 
         stream_chat_counts.pop(twitch_username, None)
     
+    await conn.close()
     currently_live.clear()
     currently_live.update(live_now)
 
@@ -1283,229 +941,153 @@ async def auto_post_currently_live():
     current_live_set = set()
     live_now = set()
     stream_info = {}
-    async with pool.acquire() as conn:
-        users = await conn.fetch("SELECT discord_id, twitch_username, rank FROM users WHERE twitch_username IS NOT NULL")
+    
+    conn = await asyncpg.connect(POSTGRES_URL)
+    users = await conn.fetch("SELECT discord_id, twitch_username, rank FROM users WHERE twitch_username IS NOT NULL")
+    for user in users:
+        twitch_username = user["twitch_username"]
+        discord_id = user["discord_id"]
+        rank = user["rank"]
+        twitch_to_discord[twitch_username] = discord_id
+        live_by_rank.setdefault(rank, []).append((discord_id, twitch_username))
+
+    async with aiohttp.ClientSession() as session:
+        headers = {
+            'Client-ID': TWITCH_CLIENT_ID,
+            'Authorization': f'Bearer {twitch_token}'
+        }
         for user in users:
             twitch_username = user["twitch_username"]
-            discord_id = user["discord_id"]
-            rank = user["rank"]
-            twitch_to_discord[twitch_username] = discord_id
-            live_by_rank.setdefault(rank, []).append((discord_id, twitch_username))
+            url = f"https://api.twitch.tv/helix/streams?user_login={twitch_username}"
+            try:
+                async with session.get(url, headers=headers) as resp:
+                    data = await resp.json()
+                    if data.get('data'):
+                        stream = data['data'][0]
+                        live_now.add(twitch_username)
+                        current_live_set.add(twitch_username)
+                        stream_info[twitch_username] = {
+                            'game_name': stream.get('game_name', 'Unknown'),
+                            'title': stream.get('title', ''),
+                            'viewer_count': stream.get('viewer_count', 0),
+                            'started_at': stream.get('started_at', '')
+                        }
+            except Exception as e:
+                print(f"Error checking stream status for {twitch_username}: {e}")
+    
+    await conn.close()
+    
+    if not live_by_rank:
+        return
 
-        async with aiohttp.ClientSession() as session:
-            headers = {
-                'Client-ID': config.twitch.client_id,
-                'Authorization': f'Bearer {twitch_token}'
-            }
-            for user in users:
-                twitch_username = user["twitch_username"]
-                url = f"https://api.twitch.tv/helix/streams?user_login={twitch_username}"
-                try:
-                    async with session.get(url, headers=headers) as resp:
-                        data = await resp.json()
-                        if data.get('data'):
-                            stream = data['data'][0]
-                            live_now.add(twitch_username)
-                            current_live_set.add(twitch_username)
-                            stream_info[twitch_username] = {
-                                'game_name': stream.get('game_name', 'Unknown'),
-                                'title': stream.get('title', ''),
-                                'viewer_count': stream.get('viewer_count', 0),
-                                'started_at': stream.get('started_at', '')
-                            }
-                except Exception as e:
-                    logger.error(f"Error checking stream status for {twitch_username}: {e}")
-        
-        if not live_by_rank:
-            return
-
-        if current_live_set != last_live_set:
-            rank_order = [
-                ("Allfather", "🦾", 6, "Earn 6 points/message (max 1 per minute per stream, up to 2 different streams per minute)"),
-                ("Chieftain", "🛡️", 5, "Earn 5 points/message (max 1 per minute per stream, up to 2 different streams per minute)"),
-                ("Jarl", "🦅", 4, "Earn 4 points/message (max 1 per minute per stream, up to 2 different streams per minute)"),
-                ("Berserker", "🐺", 3, "Earn 3 points/message (max 1 per minute per stream, up to 2 different streams per minute)"),
-                ("Raider", "🛶", 2, "Earn 2 points/message (max 1 per minute per stream, up to 2 different streams per minute)"),
-                ("Thrall", "🪓", 1, "Earn 1 point/message (max 1 per minute per stream, up to 2 different streams per minute)")
-            ]
-            channel = discord.utils.get(bot.get_all_channels(), name="╡streams-live")
-            if channel:
-                # Delete previous bot messages in this channel
-                async for msg in channel.history(limit=20):
-                    if msg.author == bot.user:
-                        try:
-                            await msg.delete()
-                        except Exception:
-                            pass
-                
-                # Send new embeds
-                for rank, icon, pts, desc in rank_order:
-                    if rank in live_by_rank:
-                        color = rank_colors.get(rank, 0x7289DA)
-                        embed = Embed(
-                            title=f"{icon} Currently Live {rank} Channels",
-                            description=f"{desc}\n",
-                            color=color
-                        )
-                        embed.set_footer(text=f"Last Updated • {datetime.now(timezone.utc).strftime('%b %d, %Y at %I:%M %p UTC')}")
-                        
-                        for discord_id, twitch_username in live_by_rank[rank]:
-                            stream = stream_info.get(twitch_username)
-                            if not stream:
-                                continue
-                            game = stream.get("game_name", "Unknown")
-                            viewers = stream.get("viewer_count", "?")
-                            started_at = stream.get("started_at")
-                            
-                            try:
-                                start_dt = datetime.fromisoformat(started_at.replace("Z", "+00:00"))
-                                now = datetime.now(timezone.utc)
-                                duration = now - start_dt
-                                hours, remainder = divmod(int(duration.total_seconds()), 3600)
-                                minutes = remainder // 60
-                                duration_str = f"{hours}h {minutes}m" if hours > 0 else f"{minutes}m"
-                            except Exception as e:
-                                logger.error(f"Error parsing stream start time for {twitch_username}: {e}")
-                                duration_str = "?"
-                            
-
-                            embed.add_field(
-                                name=f"{discord_id}",
-                                value=(
-                                    f"**{game}**\n"
-                                    f"👁️ {viewers} viewers\n"
-                                    f"⏱️ Live for {duration_str}\n"
-                                    f"🔗 [Watch here](https://twitch.tv/{twitch_username})"
-                                ),
-                                inline=False
-                            )
-                        
-                        await channel.send(embed=embed)
+    if current_live_set != last_live_set:
+        rank_order = [
+            ("Allfather", "🦾", 6, "Earn 6 points/message (max 1 per minute per stream, up to 2 different streams per minute)"),
+            ("Chieftain", "🛡️", 5, "Earn 5 points/message (max 1 per minute per stream, up to 2 different streams per minute)"),
+            ("Jarl", "🦅", 4, "Earn 4 points/message (max 1 per minute per stream, up to 2 different streams per minute)"),
+            ("Berserker", "🐺", 3, "Earn 3 points/message (max 1 per minute per stream, up to 2 different streams per minute)"),
+            ("Raider", "🛶", 2, "Earn 2 points/message (max 1 per minute per stream, up to 2 different streams per minute)"),
+            ("Thrall", "🪓", 1, "Earn 1 point/message (max 1 per minute per stream, up to 2 different streams per minute)")
+        ]
+        channel = discord.utils.get(bot.get_all_channels(), name="╡streams-live")
+        if channel:
+            # Delete previous bot messages in this channel
+            async for msg in channel.history(limit=20):
+                if msg.author == bot.user:
+                    try:
+                        await msg.delete()
+                    except Exception:
+                        pass
             
-            last_live_set = current_live_set.copy()
+            # Send new embeds
+            for rank, icon, pts, desc in rank_order:
+                if rank in live_by_rank:
+                    color = rank_colors.get(rank, 0x7289DA)
+                    embed = Embed(
+                        title=f"{icon} Currently Live {rank} Channels",
+                        description=f"{desc}\n",
+                        color=color
+                    )
+                    embed.set_footer(text=f"Last Updated • {datetime.now(timezone.utc).strftime('%b %d, %Y at %I:%M %p UTC')}")
+                    
+                    for discord_id, twitch_username in live_by_rank[rank]:
+                        stream = stream_info.get(twitch_username)
+                        if not stream:
+                            continue
+                        game = stream.get("game_name", "Unknown")
+                        viewers = stream.get("viewer_count", "?")
+                        started_at = stream.get("started_at")
+                        
+                        try:
+                            start_dt = datetime.fromisoformat(started_at.replace("Z", "+00:00"))
+                            now = datetime.now(timezone.utc)
+                            duration = now - start_dt
+                            hours, remainder = divmod(int(duration.total_seconds()), 3600)
+                            minutes = remainder // 60
+                            duration_str = f"{hours}h {minutes}m" if hours > 0 else f"{minutes}m"
+                        except Exception as e:
+                            print(f"Error parsing stream start time for {twitch_username}: {e}")
+                            duration_str = "?"
+                        
 
-            # After processing, update last_live_set
-            last_live_set = current_live_set.copy()
+                        embed.add_field(
+                            name=f"{discord_id}",
+                            value=(
+                                f"**{game}**\n"
+                                f"👁️ {viewers} viewers\n"
+                                f"⏱️ Live for {duration_str}\n"
+                                f"🔗 [Watch here](https://twitch.tv/{twitch_username})"
+                            ),
+                            inline=False
+                        )
+                    
+                    await channel.send(embed=embed)
+        
+        last_live_set = current_live_set.copy()
 
-# ---- GRACEFUL SHUTDOWN ---- #
-async def shutdown_handler():
-    """Handle graceful shutdown"""
-    logger.info("Shutting down ValhallaBot...")
-    
-    # Stop background tasks
-    try:
-        if check_live_streams.is_running():
-            check_live_streams.stop()
-        if auto_post_currently_live.is_running():
-            auto_post_currently_live.stop()
-        logger.info("✅ Background tasks stopped")
-    except Exception as e:
-        logger.error(f"Error stopping background tasks: {e}")
-    
-    # Close Twitch bot
-    try:
-        if twitch_bot_instance:
-            await twitch_bot_instance.close()
-        logger.info("✅ Twitch bot closed")
-    except Exception as e:
-        logger.error(f"Error closing Twitch bot: {e}")
-    
-    # Close TwitchIO v3 Chat Bot
-    try:
-        if twitch_bot_instance:
-            await twitch_bot_instance.close()
-        logger.info("✅ Twitch chat bot closed")
-    except Exception as e:
-        logger.error(f"Error closing Twitch chat bot: {e}")
-    
-    # Close web server
-    try:
-        if web_runner:
-            await web_runner.cleanup()
-        logger.info("✅ Web server closed")
-    except Exception as e:
-        logger.error(f"Error closing web server: {e}")
-    
-    # Close database pool
-    try:
-        if hasattr(db_manager, 'pool') and db_manager.pool:
-            await db_manager.close_pool()
-        logger.info("✅ Database pool closed")
-    except Exception as e:
-        logger.error(f"Error closing database pool: {e}")
-    
-    # Close Discord bot
-    try:
-        await bot.close()
-        logger.info("✅ Discord bot closed")
-    except Exception as e:
-        logger.error(f"Error closing Discord bot: {e}")
-
-def signal_handler(signum, frame):
-    """Handle shutdown signals"""
-    logger.info(f"Received signal {signum}, initiating shutdown...")
-    asyncio.create_task(shutdown_handler())
+        # After processing, update last_live_set
+        last_live_set = current_live_set.copy()
 
 # ---- MAIN FUNCTION ---- #
 async def main():
-    """Main startup function"""
-    global pool, twitch_bot_instance, twitch_token
+    """Main startup function for Render deployment"""
+    global twitch_token
     
+    print("🛡️ Starting ValhallaBot2 on Render...")
+    
+    # Initialize database
+    await initialize_database()
+    
+    # Get Twitch token
+    await get_twitch_oauth_token()
+    
+    # Setup webhook server
+    webhook_runner = await setup_webhook_server()
+    
+    # Start background tasks
+    if not check_live_streams.is_running():
+        check_live_streams.start()
+    if not auto_post_currently_live.is_running():
+        auto_post_currently_live.start()
+    
+    # Start Discord bot
     try:
-        # Initialize database connection pool
-        logger.info("Connecting to database...")
-        db_url = getattr(getattr(config, 'database', None), 'url', None) or os.getenv('DATABASE_URL')
-        if not db_url:
-            raise ValueError("Database URL not configured")
-        
-        db_manager.database_url = db_url
-        await db_manager.init_pool()
-        pool = db_manager.pool
-        
-        # Initialize all components
-        await initialize_database()
-        twitch_token = await get_twitch_oauth_token()
-        await setup_webhook_server()
-        
-        # Start Discord bot
-        bot_token = getattr(getattr(config, 'discord', None), 'bot_token', None) or os.getenv('DISCORD_BOT_TOKEN')
-        if not bot_token:
-            raise ValueError("Discord bot token not configured")
-        
-        discord_task = asyncio.create_task(bot.start(bot_token))
-        
-        # Start background tasks
-        if not check_live_streams.is_running():
-            check_live_streams.start()
-        if not auto_post_currently_live.is_running():
-            auto_post_currently_live.start()
-            
-        # Setup signal handlers
-        for sig in (signal.SIGTERM, signal.SIGINT):
-            signal.signal(sig, signal_handler)
-            
-        # Keep running until interrupted
-        try:
-            await discord_task
-        except asyncio.CancelledError:
-            await shutdown_handler()
-            
+        await bot.start(DISCORD_BOT_TOKEN)
     except Exception as e:
-        logger.error(f"❌ Fatal error in main(): {e}")
-        traceback.print_exc()
-        await shutdown_handler()
+        print(f"Error starting bot: {e}")
         raise
+    finally:
+        # Cleanup webhook server
+        if 'webhook_runner' in locals():
+            await webhook_runner.cleanup()
 
 # ---- PROGRAM ENTRY POINT ---- #
 if __name__ == "__main__":
     try:
-        logger.info("🛡️ Starting ValhallaBot2...")
         asyncio.run(main())
     except KeyboardInterrupt:
-        logger.info("Received keyboard interrupt, shutting down...")
+        print("Bot stopped by user")
     except Exception as e:
-        logger.error(f"Fatal error: {e}")
+        print(f"Fatal error: {e}")
+        import traceback
         traceback.print_exc()
-        sys.exit(1)
-    finally:
-        logger.info("ValhallaBot2 shutdown complete")

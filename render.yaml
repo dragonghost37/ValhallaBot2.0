@@ -1,0 +1,39 @@
+services:
+  # ValhallaBot2 Discord/Twitch Bot Service
+  - type: web
+    name: valhallabot2
+    env: python
+    plan: starter
+    buildCommand: pip install -r requirements.txt
+    startCommand: python start.py
+    envVars:
+      - key: DISCORD_BOT_TOKEN
+        sync: false
+      - key: TWITCH_CLIENT_ID
+        sync: false
+      - key: TWITCH_CLIENT_SECRET
+        sync: false
+      - key: TWITCH_BOT_TOKEN
+        sync: false
+      - key: DATABASE_URL
+        fromDatabase:
+          name: valhallabot-db
+          property: connectionString
+      - key: WEBHOOK_URL
+        value: https://valhallabot2.onrender.com/eventsub
+      - key: EVENTSUB_SECRET
+        generateValue: true
+      - key: PYTHON_VERSION
+        value: "3.11"
+      - key: PORT
+        value: "8000"
+    healthCheckPath: /health
+    autoDeploy: true
+    
+  # PostgreSQL Database
+  - type: pgsql
+    name: valhallabot-db
+    plan: starter
+    databaseName: valhallabot
+    user: valhallabot
+    region: oregon

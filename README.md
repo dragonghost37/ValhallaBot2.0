@@ -1,25 +1,43 @@
-# ValhallaBot2 - Production Discord/Twitch Integration Bot
+# ValhallaBot2 🛡️
 
-A comprehensive Discord bot with Twitch integration featuring robust security, monitoring, and production-grade architecture.
+**A comprehensive Discord/Twitch integration bot for the Valhalla Gaming community**
 
-## Features
+ValhallaBot2 manages a gamified ranking system where Discord users link their Twitch accounts, earn points through community engagement, and climb through Norse-themed ranks.
 
-- **Discord Integration**: Slash commands, role management, welcome system
-- **Twitch Integration**: EventSub webhooks, raid tracking, stream monitoring
-- **Ranking System**: Automatic rank progression based on community support
-- **Security**: Input validation, rate limiting, webhook signature verification
-- **Monitoring**: Comprehensive metrics, health checks, error tracking
-- **Production Ready**: Circuit breakers, retry logic, graceful shutdown
+## 🎯 Features
 
-## Setup
+### Core Features
+- **🔗 Twitch Integration**: Link Discord accounts to Twitch usernames
+- **⚔️ Point System**: Earn points through chat participation and raids
+- **🏆 Dynamic Ranking**: Automatic rank updates based on point percentiles
+- **📊 Live Stream Monitoring**: Real-time notifications when members go live
+- **📈 Comprehensive Stats**: Detailed user and community analytics
 
-### Prerequisites
+### Bonus Systems
+- **🎁 Welcome Bonus**: 100 points for first-time Twitch linking
+- **🤝 Referral System**: 200 points when referred users reach 400 points
+- **💬 Chat Rewards**: Variable points based on streamer rank (1-6 points per message)
+- **⚔️ Raid Rewards**: 10 points per viewer raided (with limits)
 
-- Python 3.8+
-- PostgreSQL database
-- Discord bot token
-- Twitch application credentials
-- Public webhook URL (for production)
+### Norse-Themed Ranks
+- **🦾 Allfather** - Top 5% (6 points/message)
+- **🛡️ Chieftain** - Top 5-15% (5 points/message)
+- **🦅 Jarl** - Top 15-30% (4 points/message)
+- **🐺 Berserker** - Top 30-50% (3 points/message)
+- **🛶 Raider** - Top 50-80% (2 points/message)
+- **🪓 Thrall** - Bottom 20% (1 point/message)
+
+## 📋 Prerequisites
+
+### System Requirements
+- **Python 3.8+**
+- **PostgreSQL Database**
+- **Web Server** (for webhooks)
+
+### Required Accounts & Tokens
+- **Discord Bot Application** ([Discord Developer Portal](https://discord.com/developers/applications))
+- **Twitch Application** ([Twitch Developer Console](https://dev.twitch.tv/console))
+- **PostgreSQL Database** ([Heroku Postgres](https://devcenter.heroku.com/articles/heroku-postgresql) or self-hosted)
 
 ### Installation
 

@@ -1,0 +1,66 @@
+# Render Ignore File
+# Files and directories to exclude from deployment
+
+# Local development files
+.env
+.env.local
+.env.development
+.env.test
+.env.production
+
+# Logs
+logs/
+*.log
+*.log.*
+
+# Python cache
+__pycache__/
+*.py[cod]
+*$py.class
+*.so
+.Python
+env/
+venv/
+ENV/
+
+# IDE files
+.vscode/
+.idea/
+*.swp
+*.swo
+*~
+
+# OS files
+.DS_Store
+.DS_Store?
+._*
+.Spotlight-V100
+.Trashes
+ehthumbs.db
+Thumbs.db
+
+# Documentation (keep only deployment docs)
+README.md
+DEPLOYMENT.md
+RESOURCES.md
+
+# Setup scripts (not needed in production)
+setup.sh
+setup.ps1
+
+# Docker files (not needed for Render)
+Dockerfile
+docker-compose.yml
+.dockerignore
+
+# Other deployment configs
+Procfile
+valhallabot.service
+nginx.conf
+
+# Health check results
+health_check_results.json
+
+# Temporary files
+*.tmp
+*.temp

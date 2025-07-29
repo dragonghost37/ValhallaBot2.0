@@ -1,22 +1,22 @@
 # ValhallaBot2 Dependencies
 
 # Discord
-discord.py>=2.3.0
+discord.py==2.3.2
 
 # Twitch
-twitchio>=2.7.0
+twitchio==2.6.0
 
 # Database
-asyncpg>=0.28.0
+asyncpg==0.29.0
 
-# HTTP Client
-aiohttp>=3.8.0
+# HTTP Client and Web Server
+aiohttp==3.9.1
 
 # Environment Variables
-python-dotenv>=1.0.0
+python-dotenv==1.0.0
 
-# Async utilities
-asyncio-mqtt>=0.13.0
+# Production Dependencies
+gunicorn==21.2.0
 
 # Logging and monitoring
 structlog>=23.1.0
@@ -26,4 +26,7 @@ cryptography>=41.0.0
 
 # Utilities
 python-dateutil>=2.8.0
+
+# Monitoring and health checks
+psutil>=5.9.0
 pytz>=2023.3
