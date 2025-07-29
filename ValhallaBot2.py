@@ -583,17 +583,19 @@ async def linktwitch_slash(interaction: discord.Interaction, twitch_username: st
             await twitch_bot.join_channels([twitch_username])
         except Exception as e:
             print(f"Error joining new Twitch channel {twitch_username}: {e}")
-        if is_first_link and bonus_points > 0:
-            await interaction.response.send_message(
-                f"✅ {interaction.user.mention}, your Twitch username `{twitch_username}` has been linked!\n"
-                f"🎉 **Welcome Bonus**: You earned {bonus_points} points for linking your Twitch account!",
-                ephemeral=True
-            )
-        else:
-            await interaction.response.send_message(
-                f"✅ {interaction.user.mention}, your Twitch username `{twitch_username}` has been updated!",
-                ephemeral=True
-            )
+
+    # Always send a response to the user
+    if is_first_link and bonus_points > 0:
+        await interaction.response.send_message(
+            f"✅ {interaction.user.mention}, your Twitch username `{twitch_username}` has been linked!\n"
+            f"🎉 **Welcome Bonus**: You earned {bonus_points} points for linking your Twitch account!",
+            ephemeral=True
+        )
+    else:
+        await interaction.response.send_message(
+            f"✅ {interaction.user.mention}, your Twitch username `{twitch_username}` has been updated!",
+            ephemeral=True
+        )
 
 @bot.tree.command(name="rank", description="Show your current Valhalla rank")
 async def rank_slash(interaction: discord.Interaction):
