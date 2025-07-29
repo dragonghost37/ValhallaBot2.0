@@ -1111,7 +1111,7 @@ async def auto_post_currently_live():
             'Authorization': f'Bearer {twitch_token}'
         }
         for user in users:
-            twitch_username = user["twitch_username"]
+            twitch_username = user[1]
             url = f"https://api.twitch.tv/helix/streams?user_login={twitch_username}"
             try:
                 async with session.get(url, headers=headers) as resp:
