@@ -299,7 +299,7 @@ async def handle_eventsub(request):
         target = event["to_broadcaster_user_login"].lower()
         viewers = int(event["viewers"])
 
-        conn = await asyncpg.connect(POSTGRES_URL)
+        conn = await psycopg.AsyncConnection.connect(POSTGRES_URL)
         raider_row = await conn.fetchrow("SELECT discord_id FROM users WHERE twitch_username = $1", raider)
         target_row = await conn.fetchrow("SELECT discord_id FROM users WHERE twitch_username = $1", target)
         channel = discord.utils.get(bot.get_all_channels(), name="╡bot-commands")
@@ -360,7 +360,7 @@ async def health_check(request):
 async def root_handler(request):
     """Root endpoint to show bot status"""
     try:
-        conn = await asyncpg.connect(POSTGRES_URL)
+        conn = await psycopg.AsyncConnection.connect(POSTGRES_URL)
         user_count = await conn.fetchval("SELECT COUNT(*) FROM users")
         await conn.close()
         
@@ -533,7 +533,7 @@ async def linktwitch_slash(interaction: discord.Interaction, twitch_username: st
         return
     discord_id = str(interaction.user.id)
     twitch_username = twitch_username.lower()
-    conn = await asyncpg.connect(POSTGRES_URL)
+    conn = await psycopg.AsyncConnection.connect(POSTGRES_URL)
     
     # Check if user already exists and has Twitch linked
     existing_user = await conn.fetchrow("SELECT twitch_username, points FROM users WHERE discord_id = $1", discord_id)
@@ -578,7 +578,7 @@ async def linktwitch_slash(interaction: discord.Interaction, twitch_username: st
 
 @bot.tree.command(name="rank", description="Show your current Valhalla rank")
 async def rank_slash(interaction: discord.Interaction):
-    conn = await asyncpg.connect(POSTGRES_URL)
+    conn = await psycopg.AsyncConnection.connect(POSTGRES_URL)
     row = await conn.fetchrow("SELECT rank FROM users WHERE discord_id = $1", str(interaction.user.id))
     await conn.close()
     if row:
@@ -590,7 +590,7 @@ async def rank_slash(interaction: discord.Interaction):
 
 @bot.tree.command(name="mypoints", description="Show your current points and rank")
 async def mypoints_slash(interaction: discord.Interaction):
-    conn = await asyncpg.connect(POSTGRES_URL)
+    conn = await psycopg.AsyncConnection.connect(POSTGRES_URL)
     row = await conn.fetchrow("SELECT points, rank FROM users WHERE discord_id = $1", str(interaction.user.id))
     await conn.close()
     if row:
@@ -602,7 +602,7 @@ async def mypoints_slash(interaction: discord.Interaction):
 
 @bot.tree.command(name="leaderboard", description="Show the top 50 warriors")
 async def leaderboard_slash(interaction: discord.Interaction):
-    conn = await asyncpg.connect(POSTGRES_URL)
+    conn = await psycopg.AsyncConnection.connect(POSTGRES_URL)
     rows = await conn.fetch("SELECT discord_id, rank, points FROM users ORDER BY points DESC LIMIT 50")
     await conn.close()
     if not rows:
@@ -626,7 +626,7 @@ async def leaderboard_slash(interaction: discord.Interaction):
 @bot.tree.command(name="stats", description="Show your Valhalla Warrior stats")
 async def stats_slash(interaction: discord.Interaction):
     discord_id = str(interaction.user.id)
-    conn = await asyncpg.connect(POSTGRES_URL)
+    conn = await psycopg.AsyncConnection.connect(POSTGRES_URL)
     row = await conn.fetchrow("SELECT rank FROM users WHERE discord_id = $1", discord_id)
     rank = row["rank"] if row else "Thrall"
     color = rank_colors.get(rank, 0x7289DA)
@@ -777,7 +777,7 @@ async def refer_slash(interaction: discord.Interaction, user: discord.Member):
         await interaction.response.send_message("❌ You can't refer yourself!", ephemeral=True)
         return
     
-    conn = await asyncpg.connect(POSTGRES_URL)
+    conn = await psycopg.AsyncConnection.connect(POSTGRES_URL)
     
     # Check if referrer exists and has linked Twitch
     referrer_data = await conn.fetchrow("SELECT twitch_username FROM users WHERE discord_id = $1", referrer_id)
@@ -847,7 +847,7 @@ class TwitchBot(twitch_commands.Bot):
             await log_chat(discord_chatter, discord_streamer)
 
 async def log_chat(chatter_discord_id, streamer_discord_id):
-    conn = await asyncpg.connect(POSTGRES_URL)
+    conn = await psycopg.AsyncConnection.connect(POSTGRES_URL)
     await conn.execute("""
         INSERT INTO chats (chatter_id, streamer_id, count)
         VALUES ($1, $2, 1)
@@ -868,7 +868,7 @@ async def check_live_streams():
     live_now = set()
     stream_info = {}
 
-    conn = await asyncpg.connect(POSTGRES_URL)
+    conn = await psycopg.AsyncConnection.connect(POSTGRES_URL)
     users = await conn.fetch("SELECT discord_id, twitch_username FROM users WHERE twitch_username IS NOT NULL")
     for user in users:
         twitch_username = user["twitch_username"]
@@ -1074,7 +1074,7 @@ async def auto_post_currently_live():
     live_now = set()
     stream_info = {}
     
-    conn = await asyncpg.connect(POSTGRES_URL)
+    conn = await psycopg.AsyncConnection.connect(POSTGRES_URL)
     users = await conn.fetch("SELECT discord_id, twitch_username, rank FROM users WHERE twitch_username IS NOT NULL")
     for user in users:
         twitch_username = user["twitch_username"]
