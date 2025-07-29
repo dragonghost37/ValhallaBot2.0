@@ -9,7 +9,8 @@ import asyncio
 import os
 from datetime import datetime, timezone
 from collections import defaultdict, deque
-from typing import Optional
+from typing import Optional, Any, Dict, Set, Deque, DefaultDict, List, Tuple, Callable, Coroutine
+
 
 # Third-party libraries
 import discord
@@ -17,6 +18,7 @@ from discord.ext import commands, tasks
 import aiohttp
 import asyncpg
 from aiohttp import web
+
 
 # Project modules
 import config
@@ -27,6 +29,7 @@ import monitoring
 from security import create_security_config, SecurityMiddleware, WebhookSecurity, security_auditor
 from error_handling import ErrorSeverity, ValidationError, APIError, DatabaseError
 from validators import InputValidator
+
 
 # Retry decorator and config (assume defined in error_handling or utils)
 try:
@@ -39,6 +42,7 @@ except ImportError:
     class RetryConfig:
         def __init__(self, max_attempts=3, base_delay=1.0):
             pass
+
 
 # API manager (assume defined in monitoring or elsewhere)
 try:
@@ -142,7 +146,7 @@ routes = web.RouteTableDef()
 
 from typing import Set, Dict, Deque, DefaultDict, Any, List, Tuple
 import asyncpg
-pool: asyncpg.Pool = None
+pool: Any = None
 twitch_bot_instance = None
 web_app = None
 web_runner = None
@@ -364,23 +368,29 @@ async def initialize_database():
             )
             
             logger.info("✅ Production database schema initialized successfully")
-            monitoring.metrics.increment_counter("database_operations_total", labels={"operation": "initialize", "status": "success"})
+            if monitoring and hasattr(monitoring, 'metrics'):
+                monitoring.metrics.increment_counter("database_operations_total", labels={"operation": "initialize", "status": "success"})
             
         finally:
-            await db_manager.pool.release(conn)
+            if hasattr(db_manager, 'pool') and db_manager.pool:
+                await db_manager.pool.release(conn)
             
     except Exception as e:
         logger.error(f"❌ Database initialization failed: {e}")
-        monitoring.metrics.increment_counter("database_operations_total", labels={"operation": "initialize", "status": "error"})
-        error_handler.handle_error(e, "database_initialization", severity=ErrorSeverity.CRITICAL)
+        if monitoring and hasattr(monitoring, 'metrics'):
+            monitoring.metrics.increment_counter("database_operations_total", labels={"operation": "initialize", "status": "error"})
+        if error_handler and hasattr(error_handler, 'handle_error'):
+            error_handler.handle_error(e, "database_initialization", severity=ErrorSeverity.CRITICAL)
         raise DatabaseError(f"Database initialization failed: {e}")
 
 # ---- PRODUCTION TWITCH INTEGRATION ---- #
 @with_retry(RetryConfig(max_attempts=3, base_delay=1.0))
-async def get_all_twitch_users() -> dict:
+async def get_all_twitch_users() -> Dict[str, str]:
     """Get all linked Twitch usernames and their Discord IDs from database with validation"""
+    import uuid
     request_id = str(uuid.uuid4())
-    monitoring.performance_monitor.start_request(request_id, "get_all_twitch_users")
+    if monitoring and hasattr(monitoring, 'performance_monitor'):
+        monitoring.performance_monitor.start_request(request_id, "get_all_twitch_users")
     try:
         conn = await db_manager.get_connection()
         try:
@@ -395,15 +405,20 @@ async def get_all_twitch_users() -> dict:
                     user_map[username] = discord_id
                 except ValidationError as e:
                     logger.warning(f"Invalid user in get_all_twitch_users: {e}")
-            monitoring.metrics.set_gauge("active_twitch_users", len(user_map))
-            monitoring.performance_monitor.end_request(request_id, True)
+            if monitoring and hasattr(monitoring, 'metrics'):
+                monitoring.metrics.set_gauge("active_twitch_users", len(user_map))
+            if monitoring and hasattr(monitoring, 'performance_monitor'):
+                monitoring.performance_monitor.end_request(request_id, True)
             return user_map
         finally:
-            await db_manager.pool.release(conn)
+            if hasattr(db_manager, 'pool') and db_manager.pool:
+                await db_manager.pool.release(conn)
     except Exception as e:
         logger.error(f"Failed to get Twitch users: {e}")
-        error_handler.handle_error(e, "get_all_twitch_users")
-        monitoring.performance_monitor.end_request(request_id, False)
+        if error_handler and hasattr(error_handler, 'handle_error'):
+            error_handler.handle_error(e, "get_all_twitch_users")
+        if monitoring and hasattr(monitoring, 'performance_monitor'):
+            monitoring.performance_monitor.end_request(request_id, False)
         return {}
 
 @with_retry(RetryConfig(max_attempts=3, base_delay=2.0))
@@ -437,14 +452,17 @@ async def get_twitch_oauth_token() -> Optional[str]:
         
         # Log successful authentication (without exposing token)
         logger.info("✅ Twitch OAuth token obtained successfully")
-        monitoring.metrics.increment_counter("twitch_auth_requests", labels={"status": "success"})
+        if monitoring and hasattr(monitoring, 'metrics'):
+            monitoring.metrics.increment_counter("twitch_auth_requests", labels={"status": "success"})
         
         return token
         
     except Exception as e:
         logger.error(f"Failed to get Twitch OAuth token: {e}")
-        monitoring.metrics.increment_counter("twitch_auth_requests", labels={"status": "error"})
-        error_handler.handle_error(e, "twitch_oauth")
+        if monitoring and hasattr(monitoring, 'metrics'):
+            monitoring.metrics.increment_counter("twitch_auth_requests", labels={"status": "error"})
+        if error_handler and hasattr(error_handler, 'handle_error'):
+            error_handler.handle_error(e, "twitch_oauth")
         raise APIError(f"Twitch authentication failed: {e}")
 
 @with_retry(RetryConfig(max_attempts=3, base_delay=1.0))
@@ -477,7 +495,8 @@ async def get_twitch_user_id(username: str, twitch_token: str) -> Optional[str]:
         
         if not response_data.get('data'):
             logger.warning(f"⚠️ User {validated_username} not found on Twitch")
-            monitoring.metrics.increment_counter("twitch_user_lookups", labels={"status": "not_found"})
+            if monitoring and hasattr(monitoring, 'metrics'):
+                monitoring.metrics.increment_counter("twitch_user_lookups", labels={"status": "not_found"})
             return None
         
         user_id = response_data['data'][0]['id']
@@ -487,13 +506,16 @@ async def get_twitch_user_id(username: str, twitch_token: str) -> Optional[str]:
             raise APIError(f"Invalid user ID received: {user_id}")
         
         logger.info(f"✅ Got Twitch user ID for {validated_username}: {user_id}")
-        monitoring.metrics.increment_counter("twitch_user_lookups", labels={"status": "success"})
+        if monitoring and hasattr(monitoring, 'metrics'):
+            monitoring.metrics.increment_counter("twitch_user_lookups", labels={"status": "success"})
         return user_id
         
     except Exception as e:
         logger.error(f"❌ Failed to get user ID for {validated_username}: {e}")
-        monitoring.metrics.increment_counter("twitch_user_lookups", labels={"status": "error"})
-        error_handler.handle_error(e, f"twitch_user_lookup_{validated_username}")
+        if monitoring and hasattr(monitoring, 'metrics'):
+            monitoring.metrics.increment_counter("twitch_user_lookups", labels={"status": "error"})
+        if error_handler and hasattr(error_handler, 'handle_error'):
+            error_handler.handle_error(e, f"twitch_user_lookup_{validated_username}")
         return None
 
 @with_retry(RetryConfig(max_attempts=3, base_delay=2.0))
@@ -537,13 +559,16 @@ async def subscribe_to_raid_events(user_id: str, twitch_token: str) -> bool:
         )
         
         logger.info(f"✅ Subscribed to raid events for user {user_id}")
-        monitoring.metrics.increment_counter("twitch_subscriptions", labels={"type": "raid", "status": "success"})
+        if monitoring and hasattr(monitoring, 'metrics'):
+            monitoring.metrics.increment_counter("twitch_subscriptions", labels={"type": "raid", "status": "success"})
         return True
         
     except Exception as e:
         logger.error(f"❌ Failed to subscribe to raid events for user {user_id}: {e}")
-        monitoring.metrics.increment_counter("twitch_subscriptions", labels={"type": "raid", "status": "error"})
-        error_handler.handle_error(e, f"eventsub_subscription_{user_id}")
+        if monitoring and hasattr(monitoring, 'metrics'):
+            monitoring.metrics.increment_counter("twitch_subscriptions", labels={"type": "raid", "status": "error"})
+        if error_handler and hasattr(error_handler, 'handle_error'):
+            error_handler.handle_error(e, f"eventsub_subscription_{user_id}")
         return False     
 
 # ---- PRODUCTION EVENTSUB HANDLER ---- #
@@ -571,8 +596,10 @@ async def handle_eventsub(request: web.Request) -> web.Response:
         if not webhook_security.verify_signature(raw_payload, signature):
             logger.warning(f"Invalid EventSub signature from {client_ip}")
             security_auditor.log_security_event("invalid_signature", client_ip, {"endpoint": "/eventsub"})
-            monitoring.metrics.increment_counter("webhook_requests", labels={"status": "invalid_signature"})
-            monitoring.performance_monitor.end_request(request_id, False)
+            if monitoring and hasattr(monitoring, 'metrics'):
+                monitoring.metrics.increment_counter("webhook_requests", labels={"status": "invalid_signature"})
+            if monitoring and hasattr(monitoring, 'performance_monitor'):
+                monitoring.performance_monitor.end_request(request_id, False)
             raise web.HTTPForbidden(text="Invalid signature")
         
         # Parse JSON payload
@@ -580,16 +607,20 @@ async def handle_eventsub(request: web.Request) -> web.Response:
             payload = json.loads(raw_payload.decode('utf-8'))
         except (json.JSONDecodeError, UnicodeDecodeError) as e:
             logger.error(f"Invalid JSON payload from {client_ip}: {e}")
-            monitoring.metrics.increment_counter("webhook_requests", labels={"status": "invalid_json"})
-            monitoring.performance_monitor.end_request(request_id, False)
+            if monitoring and hasattr(monitoring, 'metrics'):
+                monitoring.metrics.increment_counter("webhook_requests", labels={"status": "invalid_json"})
+            if monitoring and hasattr(monitoring, 'performance_monitor'):
+                monitoring.performance_monitor.end_request(request_id, False)
             raise web.HTTPBadRequest(text="Invalid JSON")
         
         # Handle challenge verification
         if "challenge" in payload:
             challenge = payload["challenge"]
             logger.info(f"EventSub challenge received from {client_ip}")
-            monitoring.metrics.increment_counter("webhook_requests", labels={"status": "challenge"})
-            monitoring.performance_monitor.end_request(request_id, True)
+            if monitoring and hasattr(monitoring, 'metrics'):
+                monitoring.metrics.increment_counter("webhook_requests", labels={"status": "challenge"})
+            if monitoring and hasattr(monitoring, 'performance_monitor'):
+                monitoring.performance_monitor.end_request(request_id, True)
             return web.Response(text=challenge, content_type="text/plain")
         
         # Process raid events
@@ -598,17 +629,22 @@ async def handle_eventsub(request: web.Request) -> web.Response:
         else:
             logger.info(f"Unhandled EventSub type: {payload.get('subscription', {}).get('type')}")
         
-        monitoring.metrics.increment_counter("webhook_requests", labels={"status": "success"})
-        monitoring.performance_monitor.end_request(request_id, True)
+        if monitoring and hasattr(monitoring, 'metrics'):
+            monitoring.metrics.increment_counter("webhook_requests", labels={"status": "success"})
+        if monitoring and hasattr(monitoring, 'performance_monitor'):
+            monitoring.performance_monitor.end_request(request_id, True)
         return web.Response(status=200)
         
     except web.HTTPException:
         raise
     except Exception as e:
         logger.error(f"EventSub handler error: {e}")
-        error_handler.handle_error(e, "eventsub_handler")
-        monitoring.metrics.increment_counter("webhook_requests", labels={"status": "error"})
-        monitoring.performance_monitor.end_request(request_id, False)
+        if error_handler and hasattr(error_handler, 'handle_error'):
+            error_handler.handle_error(e, "eventsub_handler")
+        if monitoring and hasattr(monitoring, 'metrics'):
+            monitoring.metrics.increment_counter("webhook_requests", labels={"status": "error"})
+        if monitoring and hasattr(monitoring, 'performance_monitor'):
+            monitoring.performance_monitor.end_request(request_id, False)
         raise web.HTTPInternalServerError()
 
 async def process_raid_event(payload: dict, client_ip: str, request_id: str):
@@ -695,23 +731,27 @@ async def process_raid_event(payload: dict, client_ip: str, request_id: str):
                 logger.info(f"Raider {raider} not found in database")
             
             # Update metrics
-            monitoring.metrics.increment_counter("raids_processed", labels={
-                "raider_found": str(bool(raider_row)),
-                "target_found": str(bool(target_row)),
-                "points_awarded": str(points_awarded > 0)
-            })
-            monitoring.metrics.record_histogram("raid_viewers", viewers)
-            monitoring.metrics.record_histogram("raid_points_awarded", points_awarded)
+            if monitoring and hasattr(monitoring, 'metrics'):
+                monitoring.metrics.increment_counter("raids_processed", labels={
+                    "raider_found": str(bool(raider_row)),
+                    "target_found": str(bool(target_row)),
+                    "points_awarded": str(points_awarded > 0)
+                })
+                monitoring.metrics.record_histogram("raid_viewers", viewers)
+                monitoring.metrics.record_histogram("raid_points_awarded", points_awarded)
             
         finally:
-            await db_manager.pool.release(conn)
+            if hasattr(db_manager, 'pool') and db_manager.pool:
+                await db_manager.pool.release(conn)
             
     except ValidationError as e:
         logger.warning(f"Invalid raid event data: {e}")
-        monitoring.metrics.increment_counter("raid_validation_errors")
+        if monitoring and hasattr(monitoring, 'metrics'):
+            monitoring.metrics.increment_counter("raid_validation_errors")
     except Exception as e:
         logger.error(f"Error processing raid event: {e}")
-        error_handler.handle_error(e, "process_raid_event")
+        if error_handler and hasattr(error_handler, 'handle_error'):
+            error_handler.handle_error(e, "process_raid_event")
         raise
 
 # ---- PRODUCTION HEALTH CHECK ENDPOINTS ---- #
@@ -789,9 +829,9 @@ async def readiness_probe(request: web.Request) -> web.Response:
 async def status_endpoint(request: web.Request) -> web.Response:
     """Comprehensive status endpoint for monitoring"""
     try:
-        status_report = monitoring.get_status_report()
-        security_summary = security_auditor.get_security_summary()
-        error_summary = error_handler.get_error_summary()
+        status_report = monitoring.get_status_report() if monitoring and hasattr(monitoring, 'get_status_report') else {}
+        security_summary = security_auditor.get_security_summary() if security_auditor and hasattr(security_auditor, 'get_security_summary') else {}
+        error_summary = error_handler.get_error_summary() if error_handler and hasattr(error_handler, 'get_error_summary') else {}
         
         return web.json_response({
             "service": "ValhallaBot",
@@ -817,18 +857,19 @@ async def check_database_ready() -> bool:
             await conn.fetchval("SELECT 1")
             return True
         finally:
-            await db_manager.pool.release(conn)
+            if hasattr(db_manager, 'pool') and db_manager.pool:
+                await db_manager.pool.release(conn)
     except Exception:
         return False
 
 def check_discord_ready() -> bool:
     """Check if Discord bot is ready"""
+    global bot
     return bot.is_ready() if 'bot' in globals() else False
 
 async def check_twitch_ready() -> bool:
     """Check if Twitch integration is ready"""
     try:
-        # Simple check - try to get OAuth token
         token = await get_twitch_oauth_token()
         return bool(token)
     except Exception:
