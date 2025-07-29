@@ -78,6 +78,7 @@ routes = web.RouteTableDef()
 twitch_api_lock = asyncio.Lock()
 
 
+
 # Global variables
 twitch_token = None
 currently_live = set()
@@ -86,6 +87,9 @@ twitch_to_discord = {}
 stream_raids = {}  # {twitch_username: [ (raider, viewers, points_awarded) ]}
 stream_raids_sent = {}  # Track raids sent by streamers
 last_live_set = set()
+
+# Global TwitchBot instance
+twitch_bot = None
 
 # ---- WEBHOOK SERVER SETUP ---- #
 async def setup_webhook_server():
@@ -532,6 +536,7 @@ async def update_user_rank(conn, discord_id):
                 except Exception:
                     pass
 
+import functools
 # ---- SLASH COMMANDS ---- #
 @bot.tree.command(name="linktwitch", description="Link your Discord to your Twitch account")
 @app_commands.describe(twitch_username="Your Twitch username")
@@ -570,6 +575,14 @@ async def linktwitch_slash(interaction: discord.Interaction, twitch_username: st
                 await update_user_rank(conn, discord_id)
                 await check_referral_bonus(conn, discord_id)
         twitch_to_discord[twitch_username] = discord_id
+
+    # --- Ensure TwitchBot joins the new channel if running ---
+    global twitch_bot
+    if twitch_bot is not None:
+        try:
+            await twitch_bot.join_channels([twitch_username])
+        except Exception as e:
+            print(f"Error joining new Twitch channel {twitch_username}: {e}")
         if is_first_link and bonus_points > 0:
             await interaction.response.send_message(
                 f"✅ {interaction.user.mention}, your Twitch username `{twitch_username}` has been linked!\n"
@@ -1229,24 +1242,39 @@ async def auto_post_currently_live():
 async def main():
     """Main startup function for Render deployment"""
     global twitch_token
-    
+
     print("🛡️ Starting ValhallaBot2 on Render...")
-    
+
     # Initialize database
     await initialize_database()
-    
+
     # Get Twitch token
     await get_twitch_oauth_token()
-    
+
     # Setup webhook server
     webhook_runner = await setup_webhook_server()
-    
+
+    # --- Start TwitchBot with all linked channels ---
+    global twitch_bot
+    # Gather all linked Twitch usernames
+    async with await psycopg.AsyncConnection.connect(POSTGRES_URL) as conn:
+        async with conn.cursor() as cur:
+            await cur.execute("SELECT twitch_username, discord_id FROM users WHERE twitch_username IS NOT NULL")
+            rows = await cur.fetchall()
+            twitch_usernames = [row[0] for row in rows]
+            user_map = {row[0]: row[1] for row in rows}
+
+    twitch_bot = TwitchBot(chat_counts=stream_chat_counts, user_map=user_map, channels=twitch_usernames)
+    # Start TwitchBot in the background
+    loop = asyncio.get_running_loop()
+    twitch_task = loop.create_task(twitch_bot.start())
+
     # Start background tasks
     if not check_live_streams.is_running():
         check_live_streams.start()
     if not auto_post_currently_live.is_running():
         auto_post_currently_live.start()
-    
+
     # Start Discord bot
     try:
         await bot.start(DISCORD_BOT_TOKEN)
