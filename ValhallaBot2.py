@@ -74,6 +74,9 @@ intents.members = True
 bot = commands.Bot(command_prefix="!", intents=intents)
 routes = web.RouteTableDef()
 
+# Global lock to prevent concurrent Twitch API calls
+twitch_api_lock = asyncio.Lock()
+
 
 # Global variables
 twitch_token = None
@@ -872,6 +875,7 @@ async def log_chat(chatter_discord_id, streamer_discord_id):
             await conn.commit()
 
 # ---- BACKGROUND TASKS ---- #
+
 @tasks.loop(minutes=1)
 async def check_live_streams():
     global currently_live
@@ -892,47 +896,48 @@ async def check_live_streams():
             twitch_username = user[1]
             twitch_to_discord[twitch_username] = user[0]
 
-    async with aiohttp.ClientSession() as session:
-        headers = {
-            'Client-ID': TWITCH_CLIENT_ID,
-            'Authorization': f'Bearer {twitch_token}'
-        }
-        for user in users:
-            twitch_username = user[1]
-            url = f"https://api.twitch.tv/helix/streams?user_login={twitch_username}"
-            try:
-                async with session.get(url, headers=headers) as resp:
-                    if resp.status == 401:
-                        # Token expired, refresh and retry once
-                        print("Twitch token expired, refreshing...")
-                        new_token = await get_twitch_oauth_token()
-                        if new_token:
-                            globals()['twitch_token'] = new_token
-                            headers['Authorization'] = f'Bearer {new_token}'
-                            async with session.get(url, headers=headers) as resp2:
-                                data = await resp2.json()
-                                if data.get('data'):
-                                    stream = data['data'][0]
-                                    live_now.add(twitch_username)
-                                    stream_info[twitch_username] = {
-                                        'game_name': stream.get('game_name', 'Unknown'),
-                                        'title': stream.get('title', ''),
-                                        'viewer_count': stream.get('viewer_count', 0)
-                                    }
+    async with twitch_api_lock:
+        async with aiohttp.ClientSession() as session:
+            headers = {
+                'Client-ID': TWITCH_CLIENT_ID,
+                'Authorization': f'Bearer {twitch_token}'
+            }
+            for user in users:
+                twitch_username = user[1]
+                url = f"https://api.twitch.tv/helix/streams?user_login={twitch_username}"
+                try:
+                    async with session.get(url, headers=headers) as resp:
+                        if resp.status == 401:
+                            # Token expired, refresh and retry once
+                            print("Twitch token expired, refreshing...")
+                            new_token = await get_twitch_oauth_token()
+                            if new_token:
+                                globals()['twitch_token'] = new_token
+                                headers['Authorization'] = f'Bearer {new_token}'
+                                async with session.get(url, headers=headers) as resp2:
+                                    data = await resp2.json()
+                                    if data.get('data'):
+                                        stream = data['data'][0]
+                                        live_now.add(twitch_username)
+                                        stream_info[twitch_username] = {
+                                            'game_name': stream.get('game_name', 'Unknown'),
+                                            'title': stream.get('title', ''),
+                                            'viewer_count': stream.get('viewer_count', 0)
+                                        }
+                            else:
+                                print("Failed to refresh Twitch token.")
                         else:
-                            print("Failed to refresh Twitch token.")
-                    else:
-                        data = await resp.json()
-                        if data.get('data'):
-                            stream = data['data'][0]
-                            live_now.add(twitch_username)
-                            stream_info[twitch_username] = {
-                                'game_name': stream.get('game_name', 'Unknown'),
-                                'title': stream.get('title', ''),
-                                'viewer_count': stream.get('viewer_count', 0)
-                            }
-            except Exception as e:
-                print(f"Error checking stream status for {twitch_username}: {e}")
+                            data = await resp.json()
+                            if data.get('data'):
+                                stream = data['data'][0]
+                                live_now.add(twitch_username)
+                                stream_info[twitch_username] = {
+                                    'game_name': stream.get('game_name', 'Unknown'),
+                                    'title': stream.get('title', ''),
+                                    'viewer_count': stream.get('viewer_count', 0)
+                                }
+                except Exception as e:
+                    print(f"Error checking stream status for {twitch_username}: {e}")
 
     # Handle newly live streams
     newly_live = live_now - currently_live
@@ -1084,6 +1089,7 @@ async def check_live_streams():
     currently_live.clear()
     currently_live.update(live_now)
 
+
 @tasks.loop(minutes=1)
 async def auto_post_currently_live():
     global last_live_set
@@ -1107,28 +1113,29 @@ async def auto_post_currently_live():
             twitch_to_discord[twitch_username] = discord_id
             live_by_rank.setdefault(rank, []).append((discord_id, twitch_username))
 
-    async with aiohttp.ClientSession() as session:
-        headers = {
-            'Client-ID': TWITCH_CLIENT_ID,
-            'Authorization': f'Bearer {twitch_token}'
-        }
-        for user in users:
-            twitch_username = user[1]
-            url = f"https://api.twitch.tv/helix/streams?user_login={twitch_username}"
-            try:
-                async with session.get(url, headers=headers) as resp:
-                    data = await resp.json()
-                    if data.get('data'):
-                        stream = data['data'][0]
-                        current_live_set.add(twitch_username)
-                        stream_info[twitch_username] = {
-                            'game_name': stream.get('game_name', 'Unknown'),
-                            'title': stream.get('title', ''),
-                            'viewer_count': stream.get('viewer_count', 0),
-                            'started_at': stream.get('started_at', '')
-                        }
-            except Exception as e:
-                print(f"Error checking stream status for {twitch_username}: {e}")
+    async with twitch_api_lock:
+        async with aiohttp.ClientSession() as session:
+            headers = {
+                'Client-ID': TWITCH_CLIENT_ID,
+                'Authorization': f'Bearer {twitch_token}'
+            }
+            for user in users:
+                twitch_username = user[1]
+                url = f"https://api.twitch.tv/helix/streams?user_login={twitch_username}"
+                try:
+                    async with session.get(url, headers=headers) as resp:
+                        data = await resp.json()
+                        if data.get('data'):
+                            stream = data['data'][0]
+                            current_live_set.add(twitch_username)
+                            stream_info[twitch_username] = {
+                                'game_name': stream.get('game_name', 'Unknown'),
+                                'title': stream.get('title', ''),
+                                'viewer_count': stream.get('viewer_count', 0),
+                                'started_at': stream.get('started_at', '')
+                            }
+                except Exception as e:
+                    print(f"Error checking stream status for {twitch_username}: {e}")
 
     await conn.close()
 
