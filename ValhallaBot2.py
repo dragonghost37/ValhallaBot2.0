@@ -597,6 +597,48 @@ async def linktwitch_slash(interaction: discord.Interaction, twitch_username: st
             ephemeral=True
         )
 
+# ---- UNLINK TWITCH COMMAND ---- #
+@bot.tree.command(name="unlinktwitch", description="Unlink your Twitch account from your Discord account")
+async def unlinktwitch_slash(interaction: discord.Interaction):
+    if interaction.channel is None or interaction.channel.name != "╡valhallabot-link":
+        await interaction.response.send_message(
+            "❌ You can only use this command in the ╡valhallabot-link channel.",
+            ephemeral=True
+        )
+        return
+    discord_id = str(interaction.user.id)
+    async with await psycopg.AsyncConnection.connect(POSTGRES_URL) as conn:
+        async with conn.cursor() as cur:
+            # Check if user exists and has Twitch linked
+            await cur.execute("SELECT twitch_username FROM users WHERE discord_id = %s", (discord_id,))
+            row = await cur.fetchone()
+            if not row or row[0] is None:
+                await interaction.response.send_message(
+                    "❌ You do not have a linked Twitch account to unlink.",
+                    ephemeral=True
+                )
+                return
+            twitch_username = row[0]
+            await cur.execute(
+                "UPDATE users SET twitch_username = NULL WHERE discord_id = %s",
+                (discord_id,)
+            )
+            await conn.commit()
+            # Remove from twitch_to_discord mapping if present
+            if twitch_username in twitch_to_discord:
+                del twitch_to_discord[twitch_username]
+    # Optionally, have TwitchBot part the channel if running
+    global twitch_bot
+    if twitch_bot is not None:
+        try:
+            await twitch_bot.part_channels([twitch_username])
+        except Exception as e:
+            print(f"Error parting Twitch channel {twitch_username}: {e}")
+    await interaction.response.send_message(
+        f"✅ {interaction.user.mention}, your Twitch account `{twitch_username}` has been unlinked.",
+        ephemeral=True
+    )
+
 @bot.tree.command(name="rank", description="Show your current Valhalla rank")
 async def rank_slash(interaction: discord.Interaction):
     async with await psycopg.AsyncConnection.connect(POSTGRES_URL) as conn:
@@ -724,6 +766,7 @@ async def help_slash(interaction: discord.Interaction):
         color=0x7289DA
     )
     embed.add_field(name="/linktwitch <twitch_username>", value="Link your Discord to your Twitch account.", inline=False)
+    embed.add_field(name="/unlinktwitch", value="Unlink your Twitch account from your Discord account.", inline=False)
     embed.add_field(name="/refer <@user>", value="Refer someone who just joined the server (earn 200 pts when they reach 400 pts).", inline=False)
     embed.add_field(name="/rank", value="Show your current Valhalla rank.", inline=False)
     embed.add_field(name="/mypoints", value="Show your current points and rank.", inline=False)
