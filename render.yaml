@@ -25,7 +25,7 @@ services:
       - key: EVENTSUB_SECRET
         generateValue: true
       - key: PYTHON_VERSION
-        value: "3.11"
+        value: "3.12"
       - key: PORT
         value: "8000"
     healthCheckPath: /health
