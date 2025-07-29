@@ -35,27 +35,30 @@ class SecurityMiddleware:
         self.request_counts: Dict[str, List[float]] = {}
         self.blocked_ips: Dict[str, float] = {}
     
-    async def __call__(self, request, handler):
-        """Middleware handler for aiohttp"""
-        client_ip = request.headers.get('X-Forwarded-For', request.remote)
+    async def __call__(self, app, handler):
+        """Middleware factory for aiohttp"""
+        async def middleware_handler(request):
+            client_ip = request.headers.get('X-Forwarded-For', request.remote)
+            
+            # Check if IP is blocked
+            if self.is_blocked(client_ip):
+                from aiohttp import web
+                raise web.HTTPTooManyRequests(text="IP temporarily blocked")
+            
+            # Check IP whitelist
+            if not self.check_ip_whitelist(client_ip):
+                from aiohttp import web
+                raise web.HTTPForbidden(text="IP not allowed")
+            
+            # Check rate limit
+            if not self.check_rate_limit(client_ip):
+                from aiohttp import web
+                raise web.HTTPTooManyRequests(text="Rate limit exceeded")
+            
+            # Continue to next handler
+            return await handler(request)
         
-        # Check if IP is blocked
-        if self.is_blocked(client_ip):
-            from aiohttp import web
-            raise web.HTTPTooManyRequests(text="IP temporarily blocked")
-        
-        # Check IP whitelist
-        if not self.check_ip_whitelist(client_ip):
-            from aiohttp import web
-            raise web.HTTPForbidden(text="IP not allowed")
-        
-        # Check rate limit
-        if not self.check_rate_limit(client_ip):
-            from aiohttp import web
-            raise web.HTTPTooManyRequests(text="Rate limit exceeded")
-        
-        # Continue to next handler
-        return await handler(request)
+        return middleware_handler
     
     def check_rate_limit(self, client_ip: str) -> bool:
         """Check if client IP is within rate limits"""
