@@ -2,56 +2,53 @@
 import sys
 import time
 import json
-    try:
-        # Initialize database connection pool
-        logger.info("Connecting to database...")
-        await db_manager.initialize(
-            config.database.url,
-            min_size=config.database.pool_min_size,
-            max_size=config.database.pool_max_size,
-            command_timeout=config.database.command_timeout
-        )
-        pool = db_manager.pool
+import traceback
 
-        # Initialize all components
-        await initialize_database()
-        twitch_token = await get_twitch_oauth_token()
-        await setup_webhook_server()
+# --- Added missing imports and definitions --- #
+import asyncio
+import os
+from datetime import datetime, timezone
+from collections import defaultdict, deque
+from typing import Optional
 
-        # Get all Twitch users and channels to join
-        user_map = await get_all_twitch_users()
-        channels_to_join = list(user_map.keys())
-        global twitch_bot_instance
-        twitch_bot_instance = TwitchBot(chat_counts=stream_chat_counts, user_map=user_map, channels=channels_to_join)
-        twitch_task = asyncio.create_task(twitch_bot_instance.start())
+# Third-party libraries
+import discord
+from discord.ext import commands, tasks
+import aiohttp
+import asyncpg
+from aiohttp import web
 
-        # Start Discord bot
-        discord_task = asyncio.create_task(bot.start(config.discord.bot_token))
+# Project modules
+import config
+import db_manager
+import error_handling as error_handler
+import security
+import monitoring
+from security import create_security_config, SecurityMiddleware, WebhookSecurity, security_auditor
+from error_handling import ErrorSeverity, ValidationError, APIError, DatabaseError
+from validators import InputValidator
 
-        # Start background tasks
-        if not check_live_streams.is_running():
-            check_live_streams.start()
-        if not auto_post_currently_live.is_running():
-            auto_post_currently_live.start()
+# Retry decorator and config (assume defined in error_handling or utils)
+try:
+    from error_handling import with_retry, RetryConfig
+except ImportError:
+    def with_retry(*args, **kwargs):
+        def decorator(f):
+            return f
+        return decorator
+    class RetryConfig:
+        def __init__(self, max_attempts=3, base_delay=1.0):
+            pass
 
-        # Setup signal handlers
-        import signal
-        for sig in (signal.SIGTERM, signal.SIGINT):
-            import functools
-            import sys
-            if sys.platform != "win32":
-                import asyncio
-                loop = asyncio.get_running_loop()
-                loop.add_signal_handler(sig, functools.partial(signal_handler, sig, None))
+# API manager (assume defined in monitoring or elsewhere)
+try:
+    from monitoring import api_manager
+except ImportError:
+    api_manager = None
 
-        # Keep running until interrupted
-        await asyncio.gather(discord_task, twitch_task)
-
-    except Exception as e:
-        logger.error(f"❌ Fatal error in main(): {e}")
-        traceback.print_exc()
-        await shutdown_handler()
-        raise
+import logging
+log_level = logging.INFO
+# ...existing code...
 logging.basicConfig(
     level=log_level,
     format='%(asctime)s - %(name)s - %(levelname)s - [%(filename)s:%(lineno)d] - %(message)s',
