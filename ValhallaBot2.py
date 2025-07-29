@@ -299,52 +299,55 @@ async def handle_eventsub(request):
         target = event["to_broadcaster_user_login"].lower()
         viewers = int(event["viewers"])
 
-        conn = await psycopg.AsyncConnection.connect(POSTGRES_URL)
-        raider_row = await conn.fetchrow("SELECT discord_id FROM users WHERE twitch_username = $1", raider)
-        target_row = await conn.fetchrow("SELECT discord_id FROM users WHERE twitch_username = $1", target)
-        channel = discord.utils.get(bot.get_all_channels(), name="╡bot-commands")
-        points_awarded = 0
-        raid_count = 0
-        if raider_row and target_row:
-            raider_id = raider_row["discord_id"]
-            target_id = target_row["discord_id"]
-            # Count raids in last 30 days
-            raid_count = await conn.fetchval(
-                "SELECT COUNT(*) FROM raids WHERE raider_id = $1 AND target_id = $2 AND timestamp > NOW() - INTERVAL '30 days'",
-                raider_id, target_id
-            )
-            if raid_count >= 5:
-                if channel:
-                    await channel.send(
-                        f"<@{raider_id}> (https://twitch.tv/{raider}) just raided <@{target_id}> (https://twitch.tv/{target}) with {viewers} viewers, "
-                        f"but you have already raided this streamer 5 times in the last 30 days. No points awarded!"
-                    )
+        async with await psycopg.AsyncConnection.connect(POSTGRES_URL) as conn:
+            async with conn.cursor() as cur:
+                await cur.execute("SELECT discord_id FROM users WHERE twitch_username = %s", (raider,))
+                raider_row = await cur.fetchone()
+                await cur.execute("SELECT discord_id FROM users WHERE twitch_username = %s", (target,))
+                target_row = await cur.fetchone()
+                channel = discord.utils.get(bot.get_all_channels(), name="╡bot-commands")
                 points_awarded = 0
-            else:
-                points_awarded = viewers * 10
-                await conn.execute("UPDATE users SET points = points + $1 WHERE discord_id = $2", points_awarded, raider_id)
-                await update_user_rank(conn, raider_id)
-                await conn.execute(
-                    "INSERT INTO raids (raider_id, target_id) VALUES ($1, $2)",
-                    raider_id, target_id
-                )
-                if channel:
-                    await channel.send(
-                        f"<@{raider_id}> (https://twitch.tv/{raider}) just raided <@{target_id}> (https://twitch.tv/{target}) with {viewers} viewers and was awarded {points_awarded} points!\n"
-                        f"You have raided this streamer {raid_count+1}/5 times within the last 30 days."
+                raid_count = 0
+                if raider_row and target_row:
+                    raider_id = raider_row[0]
+                    target_id = target_row[0]
+                    # Count raids in last 30 days
+                    await cur.execute(
+                        "SELECT COUNT(*) FROM raids WHERE raider_id = %s AND target_id = %s AND timestamp > NOW() - INTERVAL '30 days'",
+                        (raider_id, target_id)
                     )
-        elif raider_row and not target_row:
-            raider_id = raider_row["discord_id"]
-            if channel:
-                await channel.send(
-                    f"<@{raider_id}>: You raided {target} with {viewers} viewers but were NOT awarded {viewers*10} points since they are not a registered streamer in this Discord. "
-                    f"Consider referring them here and earn 200 points once they reach 400 points!"
-                )
-        # --- Log the raid for the stream summary ---
-        if target not in stream_raids:
-            stream_raids[target] = []
-        stream_raids[target].append((raider, viewers, points_awarded))
-        await conn.close()
+                    raid_count = (await cur.fetchone())[0]
+                    if raid_count >= 5:
+                        if channel:
+                            await channel.send(
+                                f"<@{raider_id}> (https://twitch.tv/{raider}) just raided <@{target_id}> (https://twitch.tv/{target}) with {viewers} viewers, "
+                                f"but you have already raided this streamer 5 times in the last 30 days. No points awarded!"
+                            )
+                        points_awarded = 0
+                    else:
+                        points_awarded = viewers * 10
+                        await cur.execute("UPDATE users SET points = points + %s WHERE discord_id = %s", (points_awarded, raider_id))
+                        await update_user_rank(conn, raider_id)
+                        await cur.execute(
+                            "INSERT INTO raids (raider_id, target_id) VALUES (%s, %s)",
+                            (raider_id, target_id)
+                        )
+                        if channel:
+                            await channel.send(
+                                f"<@{raider_id}> (https://twitch.tv/{raider}) just raided <@{target_id}> (https://twitch.tv/{target}) with {viewers} viewers and was awarded {points_awarded} points!\n"
+                                f"You have raided this streamer {raid_count+1}/5 times within the last 30 days."
+                            )
+                elif raider_row and not target_row:
+                    raider_id = raider_row[0]
+                    if channel:
+                        await channel.send(
+                            f"<@{raider_id}>: You raided {target} with {viewers} viewers but were NOT awarded {viewers*10} points since they are not a registered streamer in this Discord. "
+                            f"Consider referring them here and earn 200 points once they reach 400 points!"
+                        )
+                # --- Log the raid for the stream summary ---
+                if target not in stream_raids:
+                    stream_raids[target] = []
+                stream_raids[target].append((raider, viewers, points_awarded))
     return web.Response(text="OK")
 
 @routes.get("/health")
@@ -360,10 +363,10 @@ async def health_check(request):
 async def root_handler(request):
     """Root endpoint to show bot status"""
     try:
-        conn = await psycopg.AsyncConnection.connect(POSTGRES_URL)
-        user_count = await conn.fetchval("SELECT COUNT(*) FROM users")
-        await conn.close()
-        
+        async with await psycopg.AsyncConnection.connect(POSTGRES_URL) as conn:
+            async with conn.cursor() as cur:
+                await cur.execute("SELECT COUNT(*) FROM users")
+                user_count = (await cur.fetchone())[0]
         status = {
             "status": "online",
             "bot_name": "ValhallaBot2",
@@ -380,146 +383,151 @@ async def root_handler(request):
 
 # ---- AWARD & RANK FUNCTIONS ---- #
 async def award_chat_points(conn, chatter_discord_id, streamer_twitch_username, count=1):
-    streamer_row = await conn.fetchrow("SELECT discord_id, rank FROM users WHERE twitch_username = $1", streamer_twitch_username)
-    if not streamer_row:
-        return
-    streamer_id = streamer_row["discord_id"]
-    rank = streamer_row["rank"]
-    points_per_message = rank_points.get(rank, 1)
-    total_points = points_per_message * count
+    async with conn.cursor() as cur:
+        await cur.execute("SELECT discord_id, rank FROM users WHERE twitch_username = %s", (streamer_twitch_username,))
+        streamer_row = await cur.fetchone()
+        if not streamer_row:
+            return
+        streamer_id = streamer_row[0]
+        rank = streamer_row[1]
+        points_per_message = rank_points.get(rank, 1)
+        total_points = points_per_message * count
 
-    # Calculate points awarded in last 48 hours
-    recent_points = await conn.fetchval("""
-        SELECT COALESCE(SUM(points_awarded), 0)
-        FROM chat_points
-        WHERE chatter_id = $1 AND streamer_id = $2 AND timestamp > NOW() - INTERVAL '48 hours'
-    """, chatter_discord_id, streamer_id)
+        # Calculate points awarded in last 48 hours
+        await cur.execute("""
+            SELECT COALESCE(SUM(points_awarded), 0)
+            FROM chat_points
+            WHERE chatter_id = %s AND streamer_id = %s AND timestamp > NOW() - INTERVAL '48 hours'
+        """, (chatter_discord_id, streamer_id))
+        recent_points = (await cur.fetchone())[0]
 
-    if recent_points >= 100:
-        return  # Already maxed out for this streamer in this window
+        if recent_points >= 100:
+            return  # Already maxed out for this streamer in this window
 
-    points_to_award = min(total_points, 100 - recent_points)
-    if points_to_award <= 0:
-        return
+        points_to_award = min(total_points, 100 - recent_points)
+        if points_to_award <= 0:
+            return
 
-    await conn.execute("UPDATE users SET points = points + $1 WHERE discord_id = $2", points_to_award, chatter_discord_id)
-    await update_user_rank(conn, chatter_discord_id)
-    await conn.execute("""
-        INSERT INTO chat_points (chatter_id, streamer_id, points_awarded, timestamp)
-        VALUES ($1, $2, $3, NOW())
-    """, chatter_discord_id, streamer_id, points_to_award)
-    
-    # Check for referral bonus milestone
-    await check_referral_bonus(conn, chatter_discord_id)
+        await cur.execute("UPDATE users SET points = points + %s WHERE discord_id = %s", (points_to_award, chatter_discord_id))
+        await update_user_rank(conn, chatter_discord_id)
+        await cur.execute("""
+            INSERT INTO chat_points (chatter_id, streamer_id, points_awarded, timestamp)
+            VALUES (%s, %s, %s, NOW())
+        """, (chatter_discord_id, streamer_id, points_to_award))
+        # Check for referral bonus milestone
+        await check_referral_bonus(conn, chatter_discord_id)
 
 async def check_referral_bonus(conn, discord_id):
     """Check if user has reached 400 points and award referral bonus to their referrer"""
-    user_data = await conn.fetchrow("SELECT points, referral_bonus_claimed, referred_by FROM users WHERE discord_id = $1", discord_id)
-    if not user_data:
-        return
-    
-    # Check if user has reached 400 points and hasn't claimed referral bonus yet
-    if user_data["points"] >= 400 and not user_data.get("referral_bonus_claimed", False):
-        # Mark bonus as claimed for this user
-        await conn.execute("UPDATE users SET referral_bonus_claimed = TRUE WHERE discord_id = $1", discord_id)
-        
-        # Check if they have a referrer
-        referrer_id = user_data.get("referred_by")
-        if referrer_id:
-            # Award 200 points to the referrer
-            await conn.execute("UPDATE users SET points = points + 200 WHERE discord_id = $1", referrer_id)
-            await update_user_rank(conn, referrer_id)
-            
-            # Notify in bot-commands channel
-            channel = discord.utils.get(bot.get_all_channels(), name="╡bot-commands")
-            if channel:
-                try:
-                    referrer_user = await bot.fetch_user(int(referrer_id))
-                    referred_user = await bot.fetch_user(int(discord_id))
-                    await channel.send(
-                        f"🎉 **Referral Bonus!** <@{referrer_id}> earned 200 points because "
-                        f"<@{discord_id}> reached 400 points! Thanks for growing our Valhalla community!"
-                    )
-                except Exception:
-                    pass
+    async with conn.cursor() as cur:
+        await cur.execute("SELECT points, referral_bonus_claimed, referred_by FROM users WHERE discord_id = %s", (discord_id,))
+        user_data = await cur.fetchone()
+        if not user_data:
+            return
+        points, referral_bonus_claimed, referred_by = user_data
+        # Check if user has reached 400 points and hasn't claimed referral bonus yet
+        if points >= 400 and not referral_bonus_claimed:
+            # Mark bonus as claimed for this user
+            await cur.execute("UPDATE users SET referral_bonus_claimed = TRUE WHERE discord_id = %s", (discord_id,))
+            # Check if they have a referrer
+            referrer_id = referred_by
+            if referrer_id:
+                # Award 200 points to the referrer
+                await cur.execute("UPDATE users SET points = points + 200 WHERE discord_id = %s", (referrer_id,))
+                await update_user_rank(conn, referrer_id)
+                # Notify in bot-commands channel
+                channel = discord.utils.get(bot.get_all_channels(), name="╡bot-commands")
+                if channel:
+                    try:
+                        referrer_user = await bot.fetch_user(int(referrer_id))
+                        referred_user = await bot.fetch_user(int(discord_id))
+                        await channel.send(
+                            f"🎉 **Referral Bonus!** <@{referrer_id}> earned 200 points because "
+                            f"<@{discord_id}> reached 400 points! Thanks for growing our Valhalla community!"
+                        )
+                    except Exception:
+                        pass
 
 async def update_user_rank(conn, discord_id):
     # Get all users sorted by points descending
-    users = await conn.fetch("SELECT discord_id, points FROM users ORDER BY points DESC")
-    total_users = len(users)
-    if total_users == 0:
-        return
+    async with conn.cursor() as cur:
+        await cur.execute("SELECT discord_id, points FROM users ORDER BY points DESC")
+        users = await cur.fetchall()
+        total_users = len(users)
+        if total_users == 0:
+            return
 
-    # Find this user's position (1-based)
-    user_points = None
-    user_rank_index = None
-    for idx, user in enumerate(users):
-        if user["discord_id"] == str(discord_id):
-            user_points = user["points"]
-            user_rank_index = idx + 1
-            break
-    if user_points is None:
-        return
+        # Find this user's position (1-based)
+        user_points = None
+        user_rank_index = None
+        for idx, user in enumerate(users):
+            if user[0] == str(discord_id):
+                user_points = user[1]
+                user_rank_index = idx + 1
+                break
+        if user_points is None:
+            return
 
-    old_rank_row = await conn.fetchrow("SELECT rank FROM users WHERE discord_id = $1", discord_id)
-    old_rank = old_rank_row["rank"] if old_rank_row else "Thrall"
+        await cur.execute("SELECT rank FROM users WHERE discord_id = %s", (discord_id,))
+        old_rank_row = await cur.fetchone()
+        old_rank = old_rank_row[0] if old_rank_row else "Thrall"
 
-    # Calculate percentiles
-    percentile = user_rank_index / total_users
+        # Calculate percentiles
+        percentile = user_rank_index / total_users
 
-    if percentile <= 0.05:
-        new_rank = "Allfather"          # Top 5%
-    elif percentile <= 0.15:
-        new_rank = "Chieftain"          # Top 5–15%
-    elif percentile <= 0.30:
-        new_rank = "Jarl"               # Top 15–30%
-    elif percentile <= 0.50:
-        new_rank = "Berserker"          # Top 30–50%
-    elif percentile <= 0.80:
-        new_rank = "Raider"             # Top 50–80%
-    else:
-        new_rank = "Thrall"             # Bottom 20%
+        if percentile <= 0.05:
+            new_rank = "Allfather"          # Top 5%
+        elif percentile <= 0.15:
+            new_rank = "Chieftain"          # Top 5–15%
+        elif percentile <= 0.30:
+            new_rank = "Jarl"               # Top 15–30%
+        elif percentile <= 0.50:
+            new_rank = "Berserker"          # Top 30–50%
+        elif percentile <= 0.80:
+            new_rank = "Raider"             # Top 50–80%
+        else:
+            new_rank = "Thrall"             # Bottom 20%
 
-    if new_rank != old_rank:
-        await conn.execute("UPDATE users SET rank = $1 WHERE discord_id = $2", new_rank, discord_id)
-        # Notify in ╡bot-commands
-        channel = discord.utils.get(bot.get_all_channels(), name="╡bot-commands")
-        if channel:
-            rank_order = ["Thrall", "Raider", "Berserker", "Jarl", "Chieftain", "Allfather"]
-            if rank_order.index(new_rank) > rank_order.index(old_rank):
-                action = "promoted to"
-            else:
-                action = "demoted to"
-            await channel.send(
-                f"🎉 <@{discord_id}> has been **{action} {new_rank}**!"
-            )
+        if new_rank != old_rank:
+            await cur.execute("UPDATE users SET rank = %s WHERE discord_id = %s", (new_rank, discord_id))
+            # Notify in ╡bot-commands
+            channel = discord.utils.get(bot.get_all_channels(), name="╡bot-commands")
+            if channel:
+                rank_order = ["Thrall", "Raider", "Berserker", "Jarl", "Chieftain", "Allfather"]
+                if rank_order.index(new_rank) > rank_order.index(old_rank):
+                    action = "promoted to"
+                else:
+                    action = "demoted to"
+                await channel.send(
+                    f"🎉 <@{discord_id}> has been **{action} {new_rank}**!"
+                )
 
-    # Assign Discord role
-    member = None
-    for guild in bot.guilds:
-        member = guild.get_member(int(discord_id))
-        if not member:
-            try:
-                member = await guild.fetch_member(int(discord_id))
-            except Exception:
-                continue
+        # Assign Discord role
+        member = None
+        for guild in bot.guilds:
+            member = guild.get_member(int(discord_id))
+            if not member:
+                try:
+                    member = await guild.fetch_member(int(discord_id))
+                except Exception:
+                    continue
+            if member:
+                break
         if member:
-            break
-    if member:
-        role_names = ["Thrall", "Raider", "Berserker", "Jarl", "Chieftain", "Allfather"]
-        roles = {r.name: r for r in member.guild.roles if r.name in role_names}
-        current_roles = [r for r in member.roles if r.name in role_names]
-        for r in current_roles:
-            try:
-                await member.remove_roles(r)
-            except Exception as e:
-                logger.exception(f"Error removing role {r.name} from {member.display_name}:")
-        new_role = roles.get(new_rank)
-        if new_role:
-            try:
-                await member.add_roles(new_role)
-            except Exception:
-                pass
+            role_names = ["Thrall", "Raider", "Berserker", "Jarl", "Chieftain", "Allfather"]
+            roles = {r.name: r for r in member.guild.roles if r.name in role_names}
+            current_roles = [r for r in member.roles if r.name in role_names]
+            for r in current_roles:
+                try:
+                    await member.remove_roles(r)
+                except Exception as e:
+                    logger.exception(f"Error removing role {r.name} from {member.display_name}:")
+            new_role = roles.get(new_rank)
+            if new_role:
+                try:
+                    await member.add_roles(new_role)
+                except Exception:
+                    pass
 
 # ---- SLASH COMMANDS ---- #
 @bot.tree.command(name="linktwitch", description="Link your Discord to your Twitch account")
@@ -533,56 +541,52 @@ async def linktwitch_slash(interaction: discord.Interaction, twitch_username: st
         return
     discord_id = str(interaction.user.id)
     twitch_username = twitch_username.lower()
-    conn = await psycopg.AsyncConnection.connect(POSTGRES_URL)
-    
-    # Check if user already exists and has Twitch linked
-    existing_user = await conn.fetchrow("SELECT twitch_username, points FROM users WHERE discord_id = $1", discord_id)
-    is_first_link = not existing_user or existing_user["twitch_username"] is None
-    
-    # Award 100 points bonus for first-time Twitch linking
-    bonus_points = 100 if is_first_link else 0
-    
-    await conn.execute(
-        """
-        INSERT INTO users (discord_id, twitch_username, rank, points)
-        VALUES ($1, $2, 'Thrall', $3)
-        ON CONFLICT (discord_id) DO UPDATE SET 
-            twitch_username = $2,
-            points = CASE 
-                WHEN users.twitch_username IS NULL THEN users.points + $3
-                ELSE users.points
-            END
-        """,
-        discord_id, twitch_username, bonus_points
-    )
-    
-    # Update user rank after points change
-    if is_first_link:
-        await update_user_rank(conn, discord_id)
-        await check_referral_bonus(conn, discord_id)
-    
-    await conn.close()
-    twitch_to_discord[twitch_username] = discord_id
-    
-    if is_first_link and bonus_points > 0:
-        await interaction.response.send_message(
-            f"✅ {interaction.user.mention}, your Twitch username `{twitch_username}` has been linked!\n"
-            f"🎉 **Welcome Bonus**: You earned {bonus_points} points for linking your Twitch account!",
-            ephemeral=True
-        )
-    else:
-        await interaction.response.send_message(
-            f"✅ {interaction.user.mention}, your Twitch username `{twitch_username}` has been updated!",
-            ephemeral=True
-        )
+    async with await psycopg.AsyncConnection.connect(POSTGRES_URL) as conn:
+        async with conn.cursor() as cur:
+            # Check if user already exists and has Twitch linked
+            await cur.execute("SELECT twitch_username, points FROM users WHERE discord_id = %s", (discord_id,))
+            existing_user = await cur.fetchone()
+            is_first_link = not existing_user or existing_user[0] is None
+            # Award 100 points bonus for first-time Twitch linking
+            bonus_points = 100 if is_first_link else 0
+            await cur.execute(
+                """
+                INSERT INTO users (discord_id, twitch_username, rank, points)
+                VALUES (%s, %s, 'Thrall', %s)
+                ON CONFLICT (discord_id) DO UPDATE SET 
+                    twitch_username = EXCLUDED.twitch_username,
+                    points = CASE 
+                        WHEN users.twitch_username IS NULL THEN users.points + EXCLUDED.points
+                        ELSE users.points
+                    END
+                """,
+                (discord_id, twitch_username, bonus_points)
+            )
+            # Update user rank after points change
+            if is_first_link:
+                await update_user_rank(conn, discord_id)
+                await check_referral_bonus(conn, discord_id)
+        twitch_to_discord[twitch_username] = discord_id
+        if is_first_link and bonus_points > 0:
+            await interaction.response.send_message(
+                f"✅ {interaction.user.mention}, your Twitch username `{twitch_username}` has been linked!\n"
+                f"🎉 **Welcome Bonus**: You earned {bonus_points} points for linking your Twitch account!",
+                ephemeral=True
+            )
+        else:
+            await interaction.response.send_message(
+                f"✅ {interaction.user.mention}, your Twitch username `{twitch_username}` has been updated!",
+                ephemeral=True
+            )
 
 @bot.tree.command(name="rank", description="Show your current Valhalla rank")
 async def rank_slash(interaction: discord.Interaction):
-    conn = await psycopg.AsyncConnection.connect(POSTGRES_URL)
-    row = await conn.fetchrow("SELECT rank FROM users WHERE discord_id = $1", str(interaction.user.id))
-    await conn.close()
+    async with await psycopg.AsyncConnection.connect(POSTGRES_URL) as conn:
+        async with conn.cursor() as cur:
+            await cur.execute("SELECT rank FROM users WHERE discord_id = %s", (str(interaction.user.id),))
+            row = await cur.fetchone()
     if row:
-        rank = row["rank"]
+        rank = row[0]
         icon = rank_icons.get(rank, "")
         await interaction.response.send_message(f"🏅 {interaction.user.mention}, your current rank is {icon} **{rank}**.", ephemeral=True)
     else:
@@ -590,29 +594,31 @@ async def rank_slash(interaction: discord.Interaction):
 
 @bot.tree.command(name="mypoints", description="Show your current points and rank")
 async def mypoints_slash(interaction: discord.Interaction):
-    conn = await psycopg.AsyncConnection.connect(POSTGRES_URL)
-    row = await conn.fetchrow("SELECT points, rank FROM users WHERE discord_id = $1", str(interaction.user.id))
-    await conn.close()
+    async with await psycopg.AsyncConnection.connect(POSTGRES_URL) as conn:
+        async with conn.cursor() as cur:
+            await cur.execute("SELECT points, rank FROM users WHERE discord_id = %s", (str(interaction.user.id),))
+            row = await cur.fetchone()
     if row:
-        points = row["points"]
-        rank = row["rank"]
+        points = row[0]
+        rank = row[1]
         await interaction.response.send_message(f"💰 {interaction.user.mention}, you have **{points}** points and your rank is **{rank}**.", ephemeral=True)
     else:
         await interaction.response.send_message("❌ You haven't linked your Twitch yet.", ephemeral=True)
 
 @bot.tree.command(name="leaderboard", description="Show the top 50 warriors")
 async def leaderboard_slash(interaction: discord.Interaction):
-    conn = await psycopg.AsyncConnection.connect(POSTGRES_URL)
-    rows = await conn.fetch("SELECT discord_id, rank, points FROM users ORDER BY points DESC LIMIT 50")
-    await conn.close()
+    async with await psycopg.AsyncConnection.connect(POSTGRES_URL) as conn:
+        async with conn.cursor() as cur:
+            await cur.execute("SELECT discord_id, rank, points FROM users ORDER BY points DESC LIMIT 50")
+            rows = await cur.fetchall()
     if not rows:
         await interaction.response.send_message("📉 No leaderboard data yet.", ephemeral=True)
         return
     msg = "🏆 Valhalla's Mightiest Warriors 🏆\n"
     for i, row in enumerate(rows, 1):
-        discord_id = row["discord_id"]
-        rank = row["rank"]
-        points = row["points"]
+        discord_id = row[0]
+        rank = row[1]
+        points = row[2]
         name = f"User({discord_id})"
         for guild in bot.guilds:
             member = guild.get_member(int(discord_id))
@@ -626,46 +632,52 @@ async def leaderboard_slash(interaction: discord.Interaction):
 @bot.tree.command(name="stats", description="Show your Valhalla Warrior stats")
 async def stats_slash(interaction: discord.Interaction):
     discord_id = str(interaction.user.id)
-    conn = await psycopg.AsyncConnection.connect(POSTGRES_URL)
-    row = await conn.fetchrow("SELECT rank FROM users WHERE discord_id = $1", discord_id)
-    rank = row["rank"] if row else "Thrall"
-    color = rank_colors.get(rank, 0x7289DA)
+    async with await psycopg.AsyncConnection.connect(POSTGRES_URL) as conn:
+        async with conn.cursor() as cur:
+            await cur.execute("SELECT rank FROM users WHERE discord_id = %s", (discord_id,))
+            row = await cur.fetchone()
+            rank = row[0] if row else "Thrall"
+            color = rank_colors.get(rank, 0x7289DA)
 
-    # Top 3 members you support
-    rows = await conn.fetch("""
-        SELECT streamer_id, count FROM chats
-        WHERE chatter_id = $1
-        ORDER BY count DESC
-        LIMIT 3
-    """, discord_id)
-    support_list = []
-    for row in rows:
-        name = f"User({row['streamer_id']})"
-        for guild in bot.guilds:
-            member = guild.get_member(int(row['streamer_id']))
-            if member:
-                name = member.display_name
-                break
-        support_list.append(f"{name} ({row['count']} chats)")
+            # Top 3 members you support
+            await cur.execute("""
+                SELECT streamer_id, count FROM chats
+                WHERE chatter_id = %s
+                ORDER BY count DESC
+                LIMIT 3
+            """, (discord_id,))
+            rows = await cur.fetchall()
+            support_list = []
+            for row in rows:
+                streamer_id = row[0]
+                count = row[1]
+                name = f"User({streamer_id})"
+                for guild in bot.guilds:
+                    member = guild.get_member(int(streamer_id))
+                    if member:
+                        name = member.display_name
+                        break
+                support_list.append(f"{name} ({count} chats)")
 
-    # Top 3 members supporting you
-    rows = await conn.fetch("""
-        SELECT chatter_id, count FROM chats
-        WHERE streamer_id = $1
-        ORDER BY count DESC
-        LIMIT 3
-    """, discord_id)
-    supporter_list = []
-    for row in rows:
-        name = f"User({row['chatter_id']})"
-        for guild in bot.guilds:
-            member = guild.get_member(int(row['chatter_id']))
-            if member:
-                name = member.display_name
-                break
-        supporter_list.append(f"{name} ({row['count']} chats)")
-
-    await conn.close()
+            # Top 3 members supporting you
+            await cur.execute("""
+                SELECT chatter_id, count FROM chats
+                WHERE streamer_id = %s
+                ORDER BY count DESC
+                LIMIT 3
+            """, (discord_id,))
+            rows = await cur.fetchall()
+            supporter_list = []
+            for row in rows:
+                chatter_id = row[0]
+                count = row[1]
+                name = f"User({chatter_id})"
+                for guild in bot.guilds:
+                    member = guild.get_member(int(chatter_id))
+                    if member:
+                        name = member.display_name
+                        break
+                supporter_list.append(f"{name} ({count} chats)")
 
     embed = discord.Embed(
         title=f"{interaction.user.display_name}'s Valhalla Warrior Stats",
@@ -847,13 +859,17 @@ class TwitchBot(twitch_commands.Bot):
             await log_chat(discord_chatter, discord_streamer)
 
 async def log_chat(chatter_discord_id, streamer_discord_id):
-    conn = await psycopg.AsyncConnection.connect(POSTGRES_URL)
-    await conn.execute("""
-        INSERT INTO chats (chatter_id, streamer_id, count)
-        VALUES ($1, $2, 1)
-        ON CONFLICT (chatter_id, streamer_id) DO UPDATE SET count = chats.count + 1
-    """, chatter_discord_id, streamer_discord_id)
-    await conn.close()
+    async with await psycopg.AsyncConnection.connect(POSTGRES_URL) as conn:
+        async with conn.cursor() as cur:
+            await cur.execute(
+                """
+                INSERT INTO chats (chatter_id, streamer_id, count)
+                VALUES (%s, %s, 1)
+                ON CONFLICT (chatter_id, streamer_id) DO UPDATE SET count = chats.count + 1
+                """,
+                (chatter_discord_id, streamer_discord_id)
+            )
+            await conn.commit()
 
 # ---- BACKGROUND TASKS ---- #
 @tasks.loop(minutes=1)
@@ -869,10 +885,12 @@ async def check_live_streams():
     stream_info = {}
 
     conn = await psycopg.AsyncConnection.connect(POSTGRES_URL)
-    users = await conn.fetch("SELECT discord_id, twitch_username FROM users WHERE twitch_username IS NOT NULL")
-    for user in users:
-        twitch_username = user["twitch_username"]
-        twitch_to_discord[twitch_username] = user["discord_id"]
+    async with conn.cursor() as cur:
+        await cur.execute("SELECT discord_id, twitch_username FROM users WHERE twitch_username IS NOT NULL")
+        users = await cur.fetchall()
+        for user in users:
+            twitch_username = user[1]
+            twitch_to_discord[twitch_username] = user[0]
 
     async with aiohttp.ClientSession() as session:
         headers = {
@@ -880,9 +898,9 @@ async def check_live_streams():
             'Authorization': f'Bearer {twitch_token}'
         }
 
-        for user in users:
-            twitch_username = user["twitch_username"]
-            url = f"https://api.twitch.tv/helix/streams?user_login={twitch_username}"
+    for user in users:
+        twitch_username = user[1]
+        url = f"https://api.twitch.tv/helix/streams?user_login={twitch_username}"
             try:
                 async with session.get(url, headers=headers) as resp:
                     if resp.status == 401:
@@ -936,8 +954,10 @@ async def check_live_streams():
                 except:
                     continue
 
-            row = await conn.fetchrow("SELECT rank FROM users WHERE discord_id = $1", str(discord_id))
-            rank = row["rank"] if row else "Unknown"
+            async with conn.cursor() as cur2:
+                await cur2.execute("SELECT rank FROM users WHERE discord_id = %s", (str(discord_id),))
+                row = await cur2.fetchone()
+                rank = row[0] if row else "Unknown"
 
             color = rank_colors.get(rank, 0x7289DA)
             embed = discord.Embed(
@@ -1075,13 +1095,15 @@ async def auto_post_currently_live():
     stream_info = {}
     
     conn = await psycopg.AsyncConnection.connect(POSTGRES_URL)
-    users = await conn.fetch("SELECT discord_id, twitch_username, rank FROM users WHERE twitch_username IS NOT NULL")
-    for user in users:
-        twitch_username = user["twitch_username"]
-        discord_id = user["discord_id"]
-        rank = user["rank"]
-        twitch_to_discord[twitch_username] = discord_id
-        live_by_rank.setdefault(rank, []).append((discord_id, twitch_username))
+    async with conn.cursor() as cur:
+        await cur.execute("SELECT discord_id, twitch_username, rank FROM users WHERE twitch_username IS NOT NULL")
+        users = await cur.fetchall()
+        for user in users:
+            discord_id = user[0]
+            twitch_username = user[1]
+            rank = user[2]
+            twitch_to_discord[twitch_username] = discord_id
+            live_by_rank.setdefault(rank, []).append((discord_id, twitch_username))
 
     async with aiohttp.ClientSession() as session:
         headers = {
