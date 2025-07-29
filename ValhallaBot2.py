@@ -2,46 +2,56 @@
 import sys
 import time
 import json
-import logging
-import asyncio
-import discord
-from discord.ext import commands, tasks
-import aiohttp
-from aiohttp import web
+    try:
+        # Initialize database connection pool
+        logger.info("Connecting to database...")
+        await db_manager.initialize(
+            config.database.url,
+            min_size=config.database.pool_min_size,
+            max_size=config.database.pool_max_size,
+            command_timeout=config.database.command_timeout
+        )
+        pool = db_manager.pool
 
-from datetime import datetime, timezone, timedelta
-from discord import app_commands, Embed
-import traceback
-import signal
-import os
-from discord import Embed
-from twitchio.ext import commands as twitch_commands
-from collections import defaultdict, deque
-import ssl
-from typing import Dict, Any, Optional, List
-import uuid
+        # Initialize all components
+        await initialize_database()
+        twitch_token = await get_twitch_oauth_token()
+        await setup_webhook_server()
 
-# Load environment variables from .env file
-from dotenv import load_dotenv
-load_dotenv()
+        # Get all Twitch users and channels to join
+        user_map = await get_all_twitch_users()
+        channels_to_join = list(user_map.keys())
+        global twitch_bot_instance
+        twitch_bot_instance = TwitchBot(chat_counts=stream_chat_counts, user_map=user_map, channels=channels_to_join)
+        twitch_task = asyncio.create_task(twitch_bot_instance.start())
 
-# Import our production modules
-from config import config
-from validators import InputValidator, ValidationError, SQLSanitizer
-from monitoring import monitoring, MetricsCollector
-from error_handling import (
-    error_handler, db_manager, api_manager, with_retry, 
-    DatabaseError, APIError, RetryConfig, CircuitBreaker, ErrorSeverity
-)
-from security import (
-    SecurityMiddleware, WebhookSecurity, create_security_config,
-    security_auditor, SSLContextManager
-)
+        # Start Discord bot
+        discord_task = asyncio.create_task(bot.start(config.discord.bot_token))
 
-import logging
-import sys
-# Relaxed logging: default to INFO if config is missing
-log_level = getattr(logging, getattr(config.monitoring, 'log_level', 'INFO'), logging.INFO)
+        # Start background tasks
+        if not check_live_streams.is_running():
+            check_live_streams.start()
+        if not auto_post_currently_live.is_running():
+            auto_post_currently_live.start()
+
+        # Setup signal handlers
+        import signal
+        for sig in (signal.SIGTERM, signal.SIGINT):
+            import functools
+            import sys
+            if sys.platform != "win32":
+                import asyncio
+                loop = asyncio.get_running_loop()
+                loop.add_signal_handler(sig, functools.partial(signal_handler, sig, None))
+
+        # Keep running until interrupted
+        await asyncio.gather(discord_task, twitch_task)
+
+    except Exception as e:
+        logger.error(f"❌ Fatal error in main(): {e}")
+        traceback.print_exc()
+        await shutdown_handler()
+        raise
 logging.basicConfig(
     level=log_level,
     format='%(asctime)s - %(name)s - %(levelname)s - [%(filename)s:%(lineno)d] - %(message)s',
@@ -1003,6 +1013,17 @@ async def log_chat(chatter_discord_id, streamer_discord_id):
             ON CONFLICT (chatter_id, streamer_id) DO UPDATE SET count = chats.count + 1
         """, chatter_discord_id, streamer_discord_id)
 
+async def setup_webhook_server():
+    global web_app, web_runner
+    logger.info("Setting up webhook server...")
+    web_app = web.Application(middlewares=[security_middleware] if security_middleware else [])
+    web_app.add_routes(routes)
+    web_runner = web.AppRunner(web_app)
+    await web_runner.setup()
+    site = web.TCPSite(web_runner, '0.0.0.0', 8080)
+    await site.start()
+    logger.info("✅ Webhook server started on port 8080")
+
 # ---- BACKGROUND TASKS ---- #
 @tasks.loop(minutes=1)
 async def check_live_streams():
@@ -1090,7 +1111,7 @@ async def check_live_streams():
 
             color = rank_colors.get(rank, 0x7289DA)
             embed = discord.Embed(
-                title=f"ᚱᚢᚾᛁᚲ  {user_obj.display_name} is now LIVE on Twitch! ᚱᚢᚾᛁᚲ",
+                title=f"\nᚱᚢᚾᛁᚲᚱᚢᚾᛁᚲ\n{user_obj.display_name} is now LIVE on Twitch!\nᚱᚢᚾᛁᚲᚱᚢᚾᛁᚲ\n",
                 color=color,
                 description=f"**Valhalla Gaming Rank:** {rank}\n"
                             f"🎮 **Game:** {stream.get('game_name')}\n"
@@ -1099,7 +1120,7 @@ async def check_live_streams():
                             f"🔗 [Watch here](https://twitch.tv/{twitch_username})"
             )
             embed.timestamp = datetime.now(timezone.utc)
-            embed.set_footer(text="ᚠᚢᚾᛖᚱᚨᛚ ᚹᚨᚱᚱᛁᛟᚱ! May Odin guide your stream!")
+            embed.set_footer(text="\nᚠᚢᚾᛖᚱᚨᛚᚠᚢᚾᛖᚱᚨᛚ\nMay Odin guide your stream!\nᚠᚢᚾᛖᚱᚨᛚᚠᚢᚾᛖᚱᚨᛚ\n")
             await channel.send(embed=embed)
 
     # Handle ended streams
@@ -1147,7 +1168,7 @@ async def check_live_streams():
 
             # Build stream summary embed
             embed = discord.Embed(
-                title=f"ᚱᚢᚾᛁᚲ  {streamer_name}'s Stream Summary ᚱᚢᚾᛁᚲ",
+                title=f"\nᚱᚢᚾᛁᚲᚱᚢᚾᛁᚲ\n{streamer_name}'s Stream Summary\nᚱᚢᚾᛁᚲᚱᚢᚾᛁᚲ\n",
                 color=color,
                 description=f"Here's a summary of the support you received:"
             )
@@ -1194,7 +1215,7 @@ async def check_live_streams():
                     inline=False
                 )
             embed.timestamp = datetime.now(timezone.utc)
-            embed.set_footer(text="ᚠᚢᚾᛖᚱᚨᛚ ᚹᚨᚱᚱᛁᛟᚱ! Skål for your efforts in Valhalla!")
+            embed.set_footer(text="\nᚠᚢᚾᛖᚱᚨᛚᚠᚢᚾᛖᚱᚨᛚ\nSkål for your efforts in Valhalla!\nᚠᚢᚾᛖᚱᚨᛚᚠᚢᚾᛖᚱᚨᛚ\n")
 
             # Tag the streamer and send summary
             await channel.send(f"Hey <@{discord_id}>, Awesome stream!")
