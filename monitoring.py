@@ -132,13 +132,13 @@ class HealthChecker:
                 results[name] = {
                     "status": "healthy" if result else "unhealthy",
                     "duration_seconds": duration,
-                    "timestamp": datetime.utcnow().isoformat()
+                    "timestamp": datetime.now(timezone.utc).isoformat()
                 }
             except Exception as e:
                 results[name] = {
                     "status": "error",
                     "error": str(e),
-                    "timestamp": datetime.utcnow().isoformat()
+                    "timestamp": datetime.now(timezone.utc).isoformat()
                 }
         
         self.last_check_results = results
@@ -157,7 +157,7 @@ class HealthChecker:
         return {
             "status": "healthy" if all_healthy else "unhealthy",
             "checks": self.last_check_results,
-            "timestamp": datetime.utcnow().isoformat()
+            "timestamp": datetime.now(timezone.utc).isoformat()
         }
 
 class MonitoringSystem:
@@ -175,7 +175,7 @@ class MonitoringSystem:
             "level": level,
             "message": message,
             "details": details or {},
-            "timestamp": datetime.utcnow().isoformat()
+            "timestamp": datetime.now(timezone.utc).isoformat()
         }
         self.alerts.append(alert)
         
@@ -188,7 +188,7 @@ class MonitoringSystem:
     def get_status_report(self) -> Dict[str, Any]:
         """Get comprehensive status report"""
         return {
-            "timestamp": datetime.utcnow().isoformat(),
+            "timestamp": datetime.now(timezone.utc).isoformat(),
             "metrics": self.metrics.get_metrics_summary(),
             "performance": self.performance_monitor.get_performance_stats(),
             "health": self.health_checker.get_overall_health(),

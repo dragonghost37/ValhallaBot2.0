@@ -28,7 +28,7 @@ import config
 import db_manager
 import error_handling as error_handler
 import security
-import monitoring
+from monitoring import monitoring
 from security import create_security_config, SecurityMiddleware, WebhookSecurity, security_auditor
 from error_handling import ErrorSeverity, ValidationError, APIError, DatabaseError
 from validators import InputValidator
@@ -49,7 +49,7 @@ except ImportError:
 
 # API manager (assume defined in monitoring or elsewhere)
 try:
-    from monitoring import api_manager
+    from error_handling import api_manager
 except ImportError:
     api_manager = None
 

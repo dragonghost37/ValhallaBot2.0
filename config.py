@@ -106,3 +106,27 @@ def create_config() -> Config:
 
 # Global config instance
 config = create_config()
+
+# Add environment attribute for backward compatibility
+config.environment = config.environment if hasattr(config, 'environment') else os.getenv('ENVIRONMENT', 'production')
+
+def validate_environment():
+    """Validate all required environment variables are set"""
+    required_vars = [
+        'DATABASE_URL',
+        'DISCORD_BOT_TOKEN', 
+        'TWITCH_CLIENT_ID',
+        'TWITCH_CLIENT_SECRET',
+        'TWITCH_EVENTSUB_SECRET',
+        'WEBHOOK_URL'
+    ]
+    
+    missing_vars = []
+    for var in required_vars:
+        if not os.getenv(var):
+            missing_vars.append(var)
+    
+    if missing_vars:
+        raise ValueError(f"Missing required environment variables: {', '.join(missing_vars)}")
+    
+    logger.info("✅ All required environment variables are set")
