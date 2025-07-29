@@ -24,7 +24,7 @@ from aiohttp import web
 
 
 # Project modules
-import config
+from config import config
 import db_manager
 import error_handling as error_handler
 import security
@@ -1008,9 +1008,9 @@ from twitchio.ext import commands as twitch_commands
 
 # ---- TWITCH BOT INTEGRATION ---- #
 class TwitchBot(twitch_commands.Bot):
-    def __init__(self, chat_counts, user_map, channels):
+    def __init__(self, token, chat_counts, user_map, channels):
         super().__init__(
-            token=config.twitch.bot_token,
+            token=token,
             prefix="!",
             initial_channels=[]
         )
