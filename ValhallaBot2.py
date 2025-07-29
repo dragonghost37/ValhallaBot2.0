@@ -901,39 +901,39 @@ async def check_live_streams():
     for user in users:
         twitch_username = user[1]
         url = f"https://api.twitch.tv/helix/streams?user_login={twitch_username}"
-            try:
-                async with session.get(url, headers=headers) as resp:
-                    if resp.status == 401:
-                        # Token expired, refresh and retry once
-                        print("Twitch token expired, refreshing...")
-                        new_token = await get_twitch_oauth_token()
-                        if new_token:
-                            globals()['twitch_token'] = new_token
-                            headers['Authorization'] = f'Bearer {new_token}'
-                            async with session.get(url, headers=headers) as resp2:
-                                data = await resp2.json()
-                                if data.get('data'):
-                                    stream = data['data'][0]
-                                    live_now.add(twitch_username)
-                                    stream_info[twitch_username] = {
-                                        'game_name': stream.get('game_name', 'Unknown'),
-                                        'title': stream.get('title', ''),
-                                        'viewer_count': stream.get('viewer_count', 0)
-                                    }
-                        else:
-                            print("Failed to refresh Twitch token.")
+        try:
+            async with session.get(url, headers=headers) as resp:
+                if resp.status == 401:
+                    # Token expired, refresh and retry once
+                    print("Twitch token expired, refreshing...")
+                    new_token = await get_twitch_oauth_token()
+                    if new_token:
+                        globals()['twitch_token'] = new_token
+                        headers['Authorization'] = f'Bearer {new_token}'
+                        async with session.get(url, headers=headers) as resp2:
+                            data = await resp2.json()
+                            if data.get('data'):
+                                stream = data['data'][0]
+                                live_now.add(twitch_username)
+                                stream_info[twitch_username] = {
+                                    'game_name': stream.get('game_name', 'Unknown'),
+                                    'title': stream.get('title', ''),
+                                    'viewer_count': stream.get('viewer_count', 0)
+                                }
                     else:
-                        data = await resp.json()
-                        if data.get('data'):
-                            stream = data['data'][0]
-                            live_now.add(twitch_username)
-                            stream_info[twitch_username] = {
-                                'game_name': stream.get('game_name', 'Unknown'),
-                                'title': stream.get('title', ''),
-                                'viewer_count': stream.get('viewer_count', 0)
-                            }
-            except Exception as e:
-                print(f"Error checking stream status for {twitch_username}: {e}")
+                        print("Failed to refresh Twitch token.")
+                else:
+                    data = await resp.json()
+                    if data.get('data'):
+                        stream = data['data'][0]
+                        live_now.add(twitch_username)
+                        stream_info[twitch_username] = {
+                            'game_name': stream.get('game_name', 'Unknown'),
+                            'title': stream.get('title', ''),
+                            'viewer_count': stream.get('viewer_count', 0)
+                        }
+        except Exception as e:
+            print(f"Error checking stream status for {twitch_username}: {e}")
 
     # Handle newly live streams
     newly_live = live_now - currently_live
