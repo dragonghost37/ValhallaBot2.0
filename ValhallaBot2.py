@@ -600,6 +600,20 @@ async def linktwitch_slash(interaction: discord.Interaction, twitch_username: st
             f"🎉 **Welcome Bonus**: You earned {bonus_points} points for linking your Twitch account!",
             ephemeral=True
         )
+        # Post a public embed in #valhallabot-link
+        channel = discord.utils.get(bot.get_all_channels(), name="╡valhallabot-link")
+        if channel:
+            embed = discord.Embed(
+                title="Twitch Linked!",
+                description=(
+                    f"{interaction.user.mention} has linked their Twitch account: [`{twitch_username}`](https://twitch.tv/{twitch_username})!\n"
+                    f"🎉 Welcome to Valhalla's Twitch integration! You earned **{bonus_points} points**."
+                ),
+                color=0x9146FF
+            )
+            embed.set_thumbnail(url=interaction.user.display_avatar.url)
+            embed.timestamp = datetime.now(timezone.utc)
+            await channel.send(embed=embed)
     else:
         await interaction.response.send_message(
             f"✅ {interaction.user.mention}, your Twitch username `{twitch_username}` has been updated!",
