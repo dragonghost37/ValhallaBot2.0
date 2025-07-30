@@ -538,6 +538,15 @@ async def update_user_rank(conn, discord_id):
 
 import functools
 # ---- SLASH COMMANDS ---- #
+
+# Ensure slash commands are synced on startup
+@bot.event
+async def on_ready():
+    try:
+        await bot.tree.sync()
+        print(f"✅ Synced slash commands for {bot.user}")
+    except Exception as e:
+        print(f"Error syncing slash commands: {e}")
 @bot.tree.command(name="linktwitch", description="Link your Discord to your Twitch account")
 @app_commands.describe(twitch_username="Your Twitch username")
 async def linktwitch_slash(interaction: discord.Interaction, twitch_username: str):
