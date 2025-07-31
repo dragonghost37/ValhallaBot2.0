@@ -306,6 +306,8 @@ async def handle_eventsub(request):
         target = event["to_broadcaster_user_login"].lower()
         viewers = int(event["viewers"])
 
+        logger.info(f"[EventSub] Received raid event: raider={raider}, target={target}, viewers={viewers}")
+
         async with await psycopg.AsyncConnection.connect(POSTGRES_URL) as conn:
             async with conn.cursor() as cur:
                 await cur.execute("SELECT discord_id FROM users WHERE twitch_username = %s", (raider,))
@@ -315,6 +317,7 @@ async def handle_eventsub(request):
                 channel = discord.utils.get(bot.get_all_channels(), name="╡bot-commands")
                 points_awarded = 0
                 raid_count = 0
+                logger.info(f"[EventSub] DB lookup: raider_row={raider_row}, target_row={target_row}")
                 if raider_row and target_row:
                     raider_id = raider_row[0]
                     target_id = target_row[0]
@@ -324,6 +327,7 @@ async def handle_eventsub(request):
                         (raider_id, target_id)
                     )
                     raid_count = (await cur.fetchone())[0]
+                    logger.info(f"[EventSub] raid_count={raid_count}")
                     if raid_count >= 5:
                         if channel:
                             await channel.send(
@@ -352,9 +356,12 @@ async def handle_eventsub(request):
                             f"Consider referring them here and earn 200 points once they reach 400 points!"
                         )
                 # --- Log the raid for the stream summary ---
-                if target not in stream_raids:
-                    stream_raids[target] = []
-                stream_raids[target].append((raider, viewers, points_awarded))
+        # Always use lowercased keys for stream_raids
+        target_lc = target.lower()
+        if target_lc not in stream_raids:
+            stream_raids[target_lc] = []
+        stream_raids[target_lc].append((raider, viewers, points_awarded))
+        logger.info(f"[EventSub] stream_raids[{target_lc}] now: {stream_raids[target_lc]}")
     return web.Response(text="OK")
 
 @routes.get("/health")
@@ -1124,7 +1131,7 @@ async def check_live_streams():
                 embed.add_field(name="Chatters", value="No chatters this stream.", inline=False)
 
             # Raids Received
-            raids = stream_raids.pop(twitch_username, [])
+            raids = stream_raids.pop(twitch_username.lower(), [])
             if raids:
                 total_raids = len(raids)
                 total_raid_viewers = sum(r[1] for r in raids)
