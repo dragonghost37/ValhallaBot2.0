@@ -1105,7 +1105,7 @@ async def check_live_streams():
                     if points == 0:
                         await channel.send(
                             f"{streamer_mention}: You raided {target_mention} ({target_url}) with {viewers} viewers but were **NOT** awarded {viewers*10} points since they are not a registered streamer in this Discord. "
-                            "Consider referring them here and earn 200 points once they reach 400 points!"
+                            "Consider inviting them to join Valhalla and use `/refer` to earn 200 points once they reach 400 points!"
                         )
                     else:
                         await channel.send(
@@ -1136,7 +1136,7 @@ async def check_live_streams():
                 total_raids = len(raids)
                 total_raid_viewers = sum(r[1] for r in raids)
                 raider_mentions = " ".join(
-                    f"<@{twitch_to_discord.get(r[0], '')}>" if twitch_to_discord.get(r[0]) else f"{r[0]}"
+                    f"<@{twitch_to_discord.get(r[0].lower(), '')}>" if twitch_to_discord.get(r[0].lower()) else f"{r[0]}"
                     for r in raids
                 )
                 embed.add_field(
