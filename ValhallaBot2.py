@@ -560,6 +560,7 @@ async def on_ready():
         print(f"✅ Synced slash commands for {bot.user}")
     except Exception as e:
         print(f"Error syncing slash commands: {e}")
+
 @bot.tree.command(name="linktwitch", description="Link your Discord to your Twitch account")
 @app_commands.describe(twitch_username="Your Twitch username")
 async def linktwitch_slash(interaction: discord.Interaction, twitch_username: str):
@@ -571,6 +572,33 @@ async def linktwitch_slash(interaction: discord.Interaction, twitch_username: st
         return
     discord_id = str(interaction.user.id)
     twitch_username = twitch_username.lower()
+
+    # --- Validate Twitch username exists via Twitch API ---
+    # Use client credentials flow token
+    global twitch_token
+    if not twitch_token:
+        await get_twitch_oauth_token()
+    headers = {
+        'Client-ID': TWITCH_CLIENT_ID,
+        'Authorization': f'Bearer {twitch_token}'
+    }
+    url = f"https://api.twitch.tv/helix/users?login={twitch_username}"
+    async with aiohttp.ClientSession() as session:
+        async with session.get(url, headers=headers) as resp:
+            if resp.status != 200:
+                await interaction.response.send_message(
+                    f"❌ Could not validate Twitch username `{twitch_username}` (Twitch API error). Please try again later.",
+                    ephemeral=True
+                )
+                return
+            data = await resp.json()
+            if not data.get("data"):
+                await interaction.response.send_message(
+                    f"❌ Twitch username `{twitch_username}` does not exist. Please check your spelling and try again.",
+                    ephemeral=True
+                )
+                return
+
     async with await psycopg.AsyncConnection.connect(POSTGRES_URL) as conn:
         async with conn.cursor() as cur:
             # Check if user already exists and has Twitch linked
