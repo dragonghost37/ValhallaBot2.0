@@ -146,6 +146,7 @@ async def initialize_database():
             CREATE TABLE IF NOT EXISTS raids (
                 raider_id TEXT,
                 target_id TEXT,
+                viewers INTEGER,
                 timestamp TIMESTAMP DEFAULT NOW()
             );
             """)
@@ -340,8 +341,8 @@ async def handle_eventsub(request):
                         await cur.execute("UPDATE users SET points = points + %s WHERE discord_id = %s", (points_awarded, raider_id))
                         await update_user_rank(conn, raider_id)
                         await cur.execute(
-                            "INSERT INTO raids (raider_id, target_id) VALUES (%s, %s)",
-                            (raider_id, target_id)
+                            "INSERT INTO raids (raider_id, target_id, viewers) VALUES (%s, %s, %s)",
+                            (raider_id, target_id, viewers)
                         )
                         if channel:
                             await channel.send(
@@ -350,6 +351,11 @@ async def handle_eventsub(request):
                             )
                 elif raider_row and not target_row:
                     raider_id = raider_row[0]
+                    # Still record the raid in the database for analytics, but target_id is NULL
+                    await cur.execute(
+                        "INSERT INTO raids (raider_id, target_id, viewers) VALUES (%s, %s, %s)",
+                        (raider_id, None, viewers)
+                    )
                     if channel:
                         await channel.send(
                             f"<@{raider_id}>: You raided {target} with {viewers} viewers but were NOT awarded {viewers*10} points since they are not a registered streamer in this Discord. "
@@ -1131,13 +1137,21 @@ async def check_live_streams():
                 embed.add_field(name="Chatters", value="No chatters this stream.", inline=False)
 
             # Raids Received
-            raids = stream_raids.pop(twitch_username.lower(), [])
-            if raids:
-                total_raids = len(raids)
-                total_raid_viewers = sum(r[1] for r in raids)
+            # Query the raids table for raids received during this stream session
+            async with conn.cursor() as cur:
+                # Get stream start and end times (approximate: last time user went live to now)
+                # For simplicity, use last 24 hours as the stream window
+                await cur.execute(
+                    "SELECT raider_id, viewers, timestamp FROM raids WHERE target_id = %s AND timestamp > NOW() - INTERVAL '24 hours'",
+                    (str(discord_id),)
+                )
+                db_raids = await cur.fetchall()
+            if db_raids:
+                total_raids = len(db_raids)
+                total_raid_viewers = sum(r[1] if len(r) > 1 and isinstance(r[1], int) else 0 for r in db_raids)
                 raider_mentions = " ".join(
-                    f"<@{twitch_to_discord.get(r[0].lower(), '')}>" if twitch_to_discord.get(r[0].lower()) else f"{r[0]}"
-                    for r in raids
+                    f"<@{r[0]}>" if r[0] else "Unknown"
+                    for r in db_raids
                 )
                 embed.add_field(
                     name="Raids",
@@ -1147,13 +1161,19 @@ async def check_live_streams():
             else:
                 embed.add_field(name="Raids", value="No raids this stream.", inline=False)
 
-            # Raids Sent (summary only)
-            if raids_sent:
-                total_sent = len(raids_sent)
-                total_sent_viewers = sum(r[1] for r in raids_sent)
+            # Raids Sent (summary only, now from DB)
+            async with conn.cursor() as cur:
+                await cur.execute(
+                    "SELECT target_id, viewers, timestamp FROM raids WHERE raider_id = %s AND timestamp > NOW() - INTERVAL '24 hours'",
+                    (str(discord_id),)
+                )
+                db_raids_sent = await cur.fetchall()
+            if db_raids_sent:
+                total_sent = len(db_raids_sent)
+                total_sent_viewers = sum(r[1] if len(r) > 1 and isinstance(r[1], int) else 0 for r in db_raids_sent)
                 target_mentions = " ".join(
-                    f"<@{twitch_to_discord.get(r[0], '')}>" if twitch_to_discord.get(r[0]) else f"{r[0]}"
-                    for r in raids_sent
+                    f"<@{r[0]}>" if r[0] else "Unknown"
+                    for r in db_raids_sent
                 )
                 embed.add_field(
                     name="Raids Sent",
