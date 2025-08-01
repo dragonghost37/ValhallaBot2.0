@@ -422,10 +422,12 @@ async def award_chat_points(conn, chatter_discord_id, streamer_twitch_username, 
         recent_points = (await cur.fetchone())[0]
 
         if recent_points >= 100:
+            logger.info(f"[award_chat_points] User {chatter_discord_id} already maxed out for streamer {streamer_id} in 48h window.")
             return  # Already maxed out for this streamer in this window
 
         points_to_award = min(total_points, 100 - recent_points)
         if points_to_award <= 0:
+            logger.info(f"[award_chat_points] No points to award for user {chatter_discord_id} in streamer {streamer_id} chat.")
             return
 
         await cur.execute("UPDATE users SET points = points + %s WHERE discord_id = %s", (points_to_award, chatter_discord_id))
@@ -434,6 +436,7 @@ async def award_chat_points(conn, chatter_discord_id, streamer_twitch_username, 
             INSERT INTO chat_points (chatter_id, streamer_id, points_awarded, timestamp)
             VALUES (%s, %s, %s, NOW())
         """, (chatter_discord_id, streamer_id, points_to_award))
+        logger.info(f"[award_chat_points] Awarded {points_to_award} points to user {chatter_discord_id} for chatting in streamer {streamer_id}'s stream.")
         # Check for referral bonus milestone
         await check_referral_bonus(conn, chatter_discord_id)
 
@@ -981,6 +984,7 @@ class TwitchBot(twitch_commands.Bot):
             if discord_chatter not in self.chat_counts[streamer]:
                 self.chat_counts[streamer][discord_chatter] = 0
             self.chat_counts[streamer][discord_chatter] += 1
+            logger.info(f"[TwitchBot] Chat event: chatter={chatter} (discord_id={discord_chatter}), streamer={streamer} (discord_id={discord_streamer}), count={self.chat_counts[streamer][discord_chatter]}")
             await log_chat(discord_chatter, discord_streamer)
 
 async def log_chat(chatter_discord_id, streamer_discord_id):
@@ -995,6 +999,7 @@ async def log_chat(chatter_discord_id, streamer_discord_id):
                 (chatter_discord_id, streamer_discord_id)
             )
             await conn.commit()
+    logger.info(f"[log_chat] Updated chats: chatter_id={chatter_discord_id}, streamer_id={streamer_discord_id}")
 
 # ---- BACKGROUND TASKS ---- #
 
