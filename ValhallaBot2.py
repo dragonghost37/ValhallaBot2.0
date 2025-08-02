@@ -1242,6 +1242,7 @@ async def check_live_streams():
                 raider_names = []
                 for r in db_raids:
                     raider_id = r[0]
+                    # Always map broadcaster to broadcaster (Discord ID to display name)
                     name = f"User({raider_id})"
                     for guild in bot.guilds:
                         member = guild.get_member(int(raider_id))
@@ -1270,6 +1271,7 @@ async def check_live_streams():
                 target_names = []
                 for r in db_raids_sent:
                     target_id = r[0]
+                    # Always map broadcaster to broadcaster (Discord ID to display name)
                     name = f"User({target_id})"
                     for guild in bot.guilds:
                         member = guild.get_member(int(target_id))
