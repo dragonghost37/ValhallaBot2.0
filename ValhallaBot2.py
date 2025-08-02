@@ -1206,10 +1206,82 @@ async def check_live_streams():
 
             # Build stream summary embed
             embed = discord.Embed(
-                title=f"\nᚱᚢᚾᛁᚲᚱᚢᚾᛁᚲ\n{streamer_name}'s Stream Summary\nᚱᚢᚾᛁᚲᚱᚢᚾᛁᚲ\n",
+                title=f"{streamer_name}'s Stream Summary",
                 color=color,
-                description=f"Here's a summary of the support you received:"
+                description=f"Here's a summary of your Valhalla Warrior support:"
             )
+            # Chatters
+            if chatters:
+                chatter_names = []
+                for chatter_id in chatters.keys():
+                    name = f"User({chatter_id})"
+                    for guild in bot.guilds:
+                        member = guild.get_member(int(chatter_id))
+                        if member:
+                            name = member.display_name
+                            break
+                    chatter_names.append(name)
+                embed.add_field(
+                    name="Chatters",
+                    value=f"You received {total_chats} chats from Valhalla Warriors\n" + ", ".join(chatter_names),
+                    inline=False
+                )
+            else:
+                embed.add_field(name="Chatters", value="No chatters this stream.", inline=False)
+
+            # Raids Received
+            async with conn.cursor() as cur:
+                await cur.execute(
+                    "SELECT raider_id, viewers, timestamp FROM raids WHERE target_id = %s AND timestamp > NOW() - INTERVAL '24 hours'",
+                    (str(discord_id),)
+                )
+                db_raids = await cur.fetchall()
+            if db_raids:
+                total_raids = len(db_raids)
+                total_raid_viewers = sum(r[1] if len(r) > 1 and isinstance(r[1], int) else 0 for r in db_raids)
+                raider_names = []
+                for r in db_raids:
+                    raider_id = r[0]
+                    name = f"User({raider_id})"
+                    for guild in bot.guilds:
+                        member = guild.get_member(int(raider_id))
+                        if member:
+                            name = member.display_name
+                            break
+                    raider_names.append(name)
+                embed.add_field(
+                    name="Raids",
+                    value=f"You received {total_raids} raid{'s' if total_raids > 1 else ''} with {total_raid_viewers} viewer{'s' if total_raid_viewers != 1 else ''}\n" + ", ".join(raider_names),
+                    inline=False
+                )
+            else:
+                embed.add_field(name="Raids", value="No raids this stream.", inline=False)
+
+            # Raids Sent
+            async with conn.cursor() as cur:
+                await cur.execute(
+                    "SELECT target_id, viewers, timestamp FROM raids WHERE raider_id = %s AND timestamp > NOW() - INTERVAL '24 hours'",
+                    (str(discord_id),)
+                )
+                db_raids_sent = await cur.fetchall()
+            if db_raids_sent:
+                total_sent = len(db_raids_sent)
+                total_sent_viewers = sum(r[1] if len(r) > 1 and isinstance(r[1], int) else 0 for r in db_raids_sent)
+                target_names = []
+                for r in db_raids_sent:
+                    target_id = r[0]
+                    name = f"User({target_id})"
+                    for guild in bot.guilds:
+                        member = guild.get_member(int(target_id))
+                        if member:
+                            name = member.display_name
+                            break
+                    target_names.append(name)
+                embed.add_field(
+                    name="Raids Sent",
+                    value=f"You sent {total_sent} raid{'s' if total_sent > 1 else ''} with {total_sent_viewers} viewer{'s' if total_sent_viewers != 1 else ''}\n" + ", ".join(target_names),
+                    inline=False
+                )
 
             # Chatters
             if chatters:
@@ -1273,11 +1345,18 @@ async def check_live_streams():
             await channel.send(f"Hey <@{discord_id}>, Awesome stream!")
             await channel.send(embed=embed)
 
-            # Award chat points based on post-stream chat counts
-            logger.info(f"[StreamEnd] Awarding chat points for streamer '{twitch_username}' (discord_id={discord_id})")
-            for chatter_id, count in chatters.items():
-                logger.info(f"[StreamEnd] Awarding chat points: chatter_id={chatter_id}, streamer_twitch_username={twitch_username}, count={count}")
-                await award_chat_points(conn, chatter_id, twitch_username, count)
+            # Award chat points and update ranks for all users who chatted during the stream
+            logger.info(f"[StreamEnd] Awarding chat points and updating ranks for streamer '{twitch_username}' (discord_id={discord_id})")
+            async with conn.cursor() as cur_award:
+                await cur_award.execute("SELECT chatter_id, count FROM chats WHERE streamer_id = %s", (str(discord_id),))
+                all_chatters = await cur_award.fetchall()
+                for chatter_row in all_chatters:
+                    chatter_id = chatter_row[0]
+                    count = chatter_row[1]
+                    logger.info(f"[StreamEnd] Awarding chat points: chatter_id={chatter_id}, streamer_twitch_username={twitch_username}, count={count}")
+                    await award_chat_points(conn, chatter_id, twitch_username, count)
+                    # Always update rank after awarding points
+                    await update_user_rank(conn, chatter_id)
 
         stream_chat_counts.pop(twitch_username, None)
     
