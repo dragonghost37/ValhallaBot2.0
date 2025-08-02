@@ -308,61 +308,43 @@ async def handle_eventsub(request):
         viewers = int(event["viewers"])
 
         logger.info(f"[EventSub] Received raid event: raider={raider}, target={target}, viewers={viewers}")
-
-        async with await psycopg.AsyncConnection.connect(POSTGRES_URL) as conn:
-            async with conn.cursor() as cur:
-                await cur.execute("SELECT discord_id FROM users WHERE twitch_username = %s", (raider,))
-                raider_row = await cur.fetchone()
-                await cur.execute("SELECT discord_id FROM users WHERE twitch_username = %s", (target,))
-                target_row = await cur.fetchone()
-                channel = discord.utils.get(bot.get_all_channels(), name="╡bot-commands")
-                points_awarded = 0
-                raid_count = 0
-                logger.info(f"[EventSub] DB lookup: raider_row={raider_row}, target_row={target_row}")
-                if raider_row and target_row:
-                    raider_id = raider_row[0]
-                    target_id = target_row[0]
-                    # Count raids in last 30 days
-                    await cur.execute(
-                        "SELECT COUNT(*) FROM raids WHERE raider_id = %s AND target_id = %s AND timestamp > NOW() - INTERVAL '30 days'",
-                        (raider_id, target_id)
-                    )
-                    raid_count = (await cur.fetchone())[0]
-                    logger.info(f"[EventSub] raid_count={raid_count}")
-                    if raid_count >= 5:
-                        if channel:
-                            await channel.send(
-                                f"<@{raider_id}> (https://twitch.tv/{raider}) just raided <@{target_id}> (https://twitch.tv/{target}) with {viewers} viewers, "
-                                f"but you have already raided this streamer 5 times in the last 30 days. No points awarded!"
+        try:
+            async with await psycopg.AsyncConnection.connect(POSTGRES_URL) as conn:
+                async with conn.cursor() as cur:
+                    await cur.execute("SELECT discord_id FROM users WHERE twitch_username = %s", (raider,))
+                    raider_row = await cur.fetchone()
+                    await cur.execute("SELECT discord_id FROM users WHERE twitch_username = %s", (target,))
+                    target_row = await cur.fetchone()
+                    channel = discord.utils.get(bot.get_all_channels(), name="╡bot-commands")
+                    points_awarded = 0
+                    logger.info(f"[EventSub] DB lookup: raider_row={raider_row}, target_row={target_row}")
+                    # Record the raid in the database with viewers
+                    if raider_row and target_row:
+                        try:
+                            await cur.execute(
+                                "INSERT INTO raids (raider_id, target_id, viewers) VALUES (%s, %s, %s)",
+                                (raider_row[0], target_row[0], viewers)
                             )
-                        points_awarded = 0
+                            await conn.commit()
+                            logger.info(f"[EventSub] Raid recorded in DB: raider_id={raider_row[0]}, target_id={target_row[0]}, viewers={viewers}")
+                        except Exception as db_exc:
+                            logger.error(f"[EventSub] Error recording raid in DB: {db_exc}")
+                    elif raider_row and not target_row:
+                        logger.warning(f"[EventSub] Target Twitch username '{target}' not linked to any Discord user.")
+                        if channel:
+                            await channel.send(f"⚠️ Raid received from `{raider}` to Twitch user `{target}` ({viewers} viewers), but target is not linked to Discord.")
+                    elif not raider_row and target_row:
+                        logger.warning(f"[EventSub] Raider Twitch username '{raider}' not linked to any Discord user.")
+                        if channel:
+                            await channel.send(f"⚠️ Raid received from Twitch user `{raider}` to `{target}` ({viewers} viewers), but raider is not linked to Discord.")
                     else:
-                        points_awarded = viewers * 10
-                        await cur.execute("UPDATE users SET points = points + %s WHERE discord_id = %s", (points_awarded, raider_id))
-                        await update_user_rank(conn, raider_id)
-                        await cur.execute(
-                            "INSERT INTO raids (raider_id, target_id, viewers) VALUES (%s, %s, %s)",
-                            (raider_id, target_id, viewers)
-                        )
+                        logger.warning(f"[EventSub] Neither raider nor target Twitch usernames are linked to Discord users.")
                         if channel:
-                            await channel.send(
-                                f"<@{raider_id}> (https://twitch.tv/{raider}) just raided <@{target_id}> (https://twitch.tv/{target}) with {viewers} viewers and was awarded {points_awarded} points!\n"
-                                f"You have raided this streamer {raid_count+1}/5 times within the last 30 days."
-                            )
-                elif raider_row and not target_row:
-                    raider_id = raider_row[0]
-                    # Still record the raid in the database for analytics, but target_id is NULL
-                    await cur.execute(
-                        "INSERT INTO raids (raider_id, target_id, viewers) VALUES (%s, %s, %s)",
-                        (raider_id, None, viewers)
-                    )
-                    if channel:
-                        await channel.send(
-                            f"<@{raider_id}>: You raided {target} with {viewers} viewers but were NOT awarded {viewers*10} points since they are not a registered streamer in this Discord. "
-                            f"Consider referring them here and earn 200 points once they reach 400 points!"
-                        )
-                # --- Log the raid for the stream summary ---
-        # Always use lowercased keys for stream_raids
+                            await channel.send(f"⚠️ Raid received from Twitch user `{raider}` to `{target}` ({viewers} viewers), but neither are linked to Discord.")
+        except Exception as exc:
+            logger.error(f"[EventSub] Exception in raid handler: {exc}")
+
+        # --- Log the raid for the stream summary (legacy, in-memory) ---
         target_lc = target.lower()
         if target_lc not in stream_raids:
             stream_raids[target_lc] = []
