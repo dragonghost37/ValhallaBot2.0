@@ -590,7 +590,7 @@ async def ensure_eventsub_subscriptions():
                 payload = {
                     "type": "channel.raid",
                     "version": "1",
-                    "condition": {"broadcaster_user_id": user_id},
+                    "condition": {"to_broadcaster_user_id": user_id},
                     "transport": {
                         "method": "webhook",
                         "callback": WEBHOOK_URL + "/eventsub",
