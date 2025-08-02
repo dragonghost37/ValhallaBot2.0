@@ -97,7 +97,7 @@ async def setup_webhook_server():
     app = web.Application()
     app.router.add_routes(routes)
     
-    port = int(os.getenv("PORT", 8000))
+    port = int(os.getenv("PORT", 10000))
     runner = web.AppRunner(app)
     await runner.setup()
     site = web.TCPSite(runner, "0.0.0.0", port)
@@ -545,79 +545,67 @@ import functools
 async def ensure_eventsub_subscriptions():
     """Background task to ensure EventSub subscriptions for all linked Twitch users."""
     global twitch_token
-        try:
-            # Get all linked Twitch usernames
-            async with await psycopg.AsyncConnection.connect(POSTGRES_URL) as conn:
-                async with conn.cursor() as cur:
-                    await cur.execute("SELECT twitch_username FROM users WHERE twitch_username IS NOT NULL")
-                    rows = await cur.fetchall()
-                    twitch_usernames = [row[0] for row in rows]
+    try:
+        # Get all linked Twitch usernames
+        async with await psycopg.AsyncConnection.connect(POSTGRES_URL) as conn:
+            async with conn.cursor() as cur:
+                await cur.execute("SELECT twitch_username FROM users WHERE twitch_username IS NOT NULL")
+                rows = await cur.fetchall()
+                twitch_usernames = [row[0] for row in rows]
 
-            # Get user IDs from Twitch API
-            headers = {
-                'Client-ID': TWITCH_CLIENT_ID,
-                'Authorization': f'Bearer {twitch_token}'
-            }
-            user_ids = {}
-            async with aiohttp.ClientSession() as session:
-                for username in twitch_usernames:
-                    url = f"https://api.twitch.tv/helix/users?login={username}"
-                    async with session.get(url, headers=headers) as resp:
-                        data = await resp.json()
-                        if data.get("data"):
-                            user_ids[username] = data["data"][0]["id"]
+        # Get user IDs from Twitch API
+        headers = {
+            'Client-ID': TWITCH_CLIENT_ID,
+            'Authorization': f'Bearer {twitch_token}'
+        }
+        user_ids = {}
+        async with aiohttp.ClientSession() as session:
+            for username in twitch_usernames:
+                url = f"https://api.twitch.tv/helix/users?login={username}"
+                async with session.get(url, headers=headers) as resp:
+                    data = await resp.json()
+                    if data.get("data"):
+                        user_ids[username] = data["data"][0]["id"]
 
-            # Get current EventSub subscriptions
-            eventsub_url = "https://api.twitch.tv/helix/eventsub/subscriptions"
-            async with aiohttp.ClientSession() as session:
-                async with session.get(eventsub_url, headers=headers) as resp:
-                    subs_data = await resp.json()
-                    logger.info(f"[EventSub] Current subscriptions: {subs_data}")
-                    active_subs = set()
-                    for sub in subs_data.get("data", []):
-                        # Log full subscription data for debugging
-                        logger.info(f"[EventSub] Subscription: {sub}")
-                        # Robustly handle missing broadcaster_user_id
-                        broadcaster_id = sub.get("condition", {}).get("broadcaster_user_id")
-                        if broadcaster_id:
-                            active_subs.add(broadcaster_id)
-                        else:
-                            logger.warning(f"[EventSub] Subscription missing broadcaster_user_id: {sub}")
+        # Get current EventSub subscriptions
+        eventsub_url = "https://api.twitch.tv/helix/eventsub/subscriptions"
+        async with aiohttp.ClientSession() as session:
+            async with session.get(eventsub_url, headers=headers) as resp:
+                subs_data = await resp.json()
+                logger.info(f"[EventSub] Current subscriptions: {subs_data}")
+                active_subs = set()
+                for sub in subs_data.get("data", []):
+                    # Log full subscription data for debugging
+                    logger.info(f"[EventSub] Subscription: {sub}")
+                    # Robustly handle missing broadcaster_user_id
+                    broadcaster_id = sub.get("condition", {}).get("broadcaster_user_id")
+                    if broadcaster_id:
+                        active_subs.add(broadcaster_id)
+                    else:
+                        logger.warning(f"[EventSub] Subscription missing broadcaster_user_id: {sub}")
 
-            # Create missing subscriptions
-            for username, user_id in user_ids.items():
-                if user_id not in active_subs:
-                    logger.info(f"[EventSub] Creating subscription for {username} (user_id={user_id})")
-                    # ...existing code for creating subscription...
-        except Exception as exc:
-            logger.error(f"[EventSub] Subscription manager error: {exc}")
-        await asyncio.sleep(600)  # Run every 10 minutes
-                    for sub in sub_data.get("data", []):
-                        if sub["type"] == "channel.raid":
-                            active_subs.add(sub["condition"]["broadcaster_user_id"])
-
-            # Create missing subscriptions
-            for username, user_id in user_ids.items():
-                if user_id not in active_subs:
-                    payload = {
-                        "type": "channel.raid",
-                        "version": "1",
-                        "condition": {"broadcaster_user_id": user_id},
-                        "transport": {
-                            "method": "webhook",
-                            "callback": WEBHOOK_URL + "/eventsub",
-                            "secret": EVENTSUB_SECRET
-                        }
+        # Create missing subscriptions
+        for username, user_id in user_ids.items():
+            if user_id not in active_subs:
+                payload = {
+                    "type": "channel.raid",
+                    "version": "1",
+                    "condition": {"broadcaster_user_id": user_id},
+                    "transport": {
+                        "method": "webhook",
+                        "callback": WEBHOOK_URL + "/eventsub",
+                        "secret": EVENTSUB_SECRET
                     }
-                    async with aiohttp.ClientSession() as session:
-                        async with session.post(eventsub_url, headers=headers, json=payload) as resp:
-                            if resp.status == 202:
-                                logger.info(f"[EventSub] Created subscription for {username} ({user_id})")
-                            else:
-                                logger.warning(f"[EventSub] Failed to create subscription for {username}: {await resp.text()}")
-        except Exception as exc:
-            logger.error(f"[EventSub] Subscription manager error: {exc}")
-        await asyncio.sleep(600)  # Run every 10 minutes
+                }
+                async with aiohttp.ClientSession() as session:
+                    async with session.post(eventsub_url, headers=headers, json=payload) as resp:
+                        if resp.status == 202:
+                            logger.info(f"[EventSub] Created subscription for {username} ({user_id})")
+                        else:
+                            logger.warning(f"[EventSub] Failed to create subscription for {username}: {await resp.text()}")
+    except Exception as exc:
+        logger.error(f"[EventSub] Subscription manager error: {exc}")
+    await asyncio.sleep(600)  # Run every 10 minutes
 # ---- SLASH COMMANDS ---- #
 
 # Ensure slash commands are synced on startup
