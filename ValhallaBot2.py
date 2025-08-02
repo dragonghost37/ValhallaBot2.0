@@ -575,14 +575,13 @@ async def ensure_eventsub_subscriptions():
                 logger.info(f"[EventSub] Current subscriptions: {subs_data}")
                 active_subs = set()
                 for sub in subs_data.get("data", []):
-                    # Log full subscription data for debugging
-                    logger.info(f"[EventSub] Subscription: {sub}")
-                    # Robustly handle missing broadcaster_user_id
-                    broadcaster_id = sub.get("condition", {}).get("broadcaster_user_id")
-                    if broadcaster_id:
-                        active_subs.add(broadcaster_id)
-                    else:
+                    cond = sub.get("condition", {})
+                    # Suppress warning for missing broadcaster_user_id in channel.raid
+                    if sub.get("type") == "channel.raid" and not cond.get("from_broadcaster_user_id"):
+                        pass  # No warning needed
+                    elif not cond.get("to_broadcaster_user_id"):
                         logger.warning(f"[EventSub] Subscription missing broadcaster_user_id: {sub}")
+                    active_subs.add(cond.get("to_broadcaster_user_id"))
 
         # Create missing subscriptions
         for username, user_id in user_ids.items():
@@ -598,11 +597,15 @@ async def ensure_eventsub_subscriptions():
                     }
                 }
                 async with aiohttp.ClientSession() as session:
-                    async with session.post(eventsub_url, headers=headers, json=payload) as resp:
-                        if resp.status == 202:
-                            logger.info(f"[EventSub] Created subscription for {username} ({user_id})")
-                        else:
-                            logger.warning(f"[EventSub] Failed to create subscription for {username}: {await resp.text()}")
+                    try:
+                        async with session.post(eventsub_url, headers=headers, json=payload) as resp:
+                            if resp.status == 409:
+                                logger.info(f"[EventSub] Subscription for {username} already exists (409 Conflict)")
+                            elif resp.status != 202:
+                                error = await resp.text()
+                                logger.warning(f"[EventSub] Failed to create subscription for {username}: {error}")
+                    except Exception as e:
+                        logger.warning(f"[EventSub] Exception creating subscription for {username}: {e}")
     except Exception as exc:
         logger.error(f"[EventSub] Subscription manager error: {exc}")
     await asyncio.sleep(600)  # Run every 10 minutes
