@@ -308,6 +308,13 @@ async def handle_eventsub(request):
         viewers = int(event["viewers"])
 
         logger.info(f"[EventSub] Received raid event: raider={raider}, target={target}, viewers={viewers}")
+        # --- Log the raid for the stream summary (legacy, in-memory) ---
+        target_lc = target.lower()
+        if target_lc not in stream_raids:
+            stream_raids[target_lc] = []
+        stream_raids[target_lc].append((raider, viewers, 0))  # points_awarded is 0 by default
+        logger.info(f"[EventSub] stream_raids[{target_lc}] now: {stream_raids[target_lc]}")
+
         try:
             async with await psycopg.AsyncConnection.connect(POSTGRES_URL) as conn:
                 async with conn.cursor() as cur:
@@ -343,13 +350,6 @@ async def handle_eventsub(request):
                             await channel.send(f"⚠️ Raid received from Twitch user `{raider}` to `{target}` ({viewers} viewers), but neither are linked to Discord.")
         except Exception as exc:
             logger.error(f"[EventSub] Exception in raid handler: {exc}")
-
-        # --- Log the raid for the stream summary (legacy, in-memory) ---
-        target_lc = target.lower()
-        if target_lc not in stream_raids:
-            stream_raids[target_lc] = []
-        stream_raids[target_lc].append((raider, viewers, points_awarded))
-        logger.info(f"[EventSub] stream_raids[{target_lc}] now: {stream_raids[target_lc]}")
     return web.Response(text="OK")
 
 @routes.get("/health")
@@ -386,14 +386,18 @@ async def root_handler(request):
 # ---- AWARD & RANK FUNCTIONS ---- #
 async def award_chat_points(conn, chatter_discord_id, streamer_twitch_username, count=1):
     async with conn.cursor() as cur:
+        logger.info(f"[award_chat_points] Called with chatter_discord_id={chatter_discord_id}, streamer_twitch_username={streamer_twitch_username}, count={count}")
         await cur.execute("SELECT discord_id, rank FROM users WHERE twitch_username = %s", (streamer_twitch_username,))
         streamer_row = await cur.fetchone()
         if not streamer_row:
+            logger.warning(f"[award_chat_points] Streamer Twitch username '{streamer_twitch_username}' not found in users table.")
             return
         streamer_id = streamer_row[0]
         rank = streamer_row[1]
         points_per_message = rank_points.get(rank, 1)
         total_points = points_per_message * count
+
+        logger.info(f"[award_chat_points] Streamer_id={streamer_id}, rank={rank}, points_per_message={points_per_message}, total_points={total_points}")
 
         # Calculate points awarded in last 48 hours
         await cur.execute("""
@@ -402,12 +406,14 @@ async def award_chat_points(conn, chatter_discord_id, streamer_twitch_username, 
             WHERE chatter_id = %s AND streamer_id = %s AND timestamp > NOW() - INTERVAL '48 hours'
         """, (chatter_discord_id, streamer_id))
         recent_points = (await cur.fetchone())[0]
+        logger.info(f"[award_chat_points] Recent points in last 48h: {recent_points}")
 
         if recent_points >= 100:
             logger.info(f"[award_chat_points] User {chatter_discord_id} already maxed out for streamer {streamer_id} in 48h window.")
             return  # Already maxed out for this streamer in this window
 
         points_to_award = min(total_points, 100 - recent_points)
+        logger.info(f"[award_chat_points] Calculated points_to_award={points_to_award}")
         if points_to_award <= 0:
             logger.info(f"[award_chat_points] No points to award for user {chatter_discord_id} in streamer {streamer_id} chat.")
             return
@@ -535,6 +541,65 @@ async def update_user_rank(conn, discord_id):
                     pass
 
 import functools
+# ---- EVENTSUB SUBSCRIPTION MANAGER ---- #
+async def ensure_eventsub_subscriptions():
+    """Background task to ensure EventSub subscriptions for all linked Twitch users."""
+    global twitch_token
+    while True:
+        try:
+            # Get all linked Twitch usernames
+            async with await psycopg.AsyncConnection.connect(POSTGRES_URL) as conn:
+                async with conn.cursor() as cur:
+                    await cur.execute("SELECT twitch_username FROM users WHERE twitch_username IS NOT NULL")
+                    rows = await cur.fetchall()
+                    twitch_usernames = [row[0] for row in rows]
+
+            # Get user IDs from Twitch API
+            headers = {
+                'Client-ID': TWITCH_CLIENT_ID,
+                'Authorization': f'Bearer {twitch_token}'
+            }
+            user_ids = {}
+            async with aiohttp.ClientSession() as session:
+                for username in twitch_usernames:
+                    url = f"https://api.twitch.tv/helix/users?login={username}"
+                    async with session.get(url, headers=headers) as resp:
+                        data = await resp.json()
+                        if data.get("data"):
+                            user_ids[username] = data["data"][0]["id"]
+
+            # Get current EventSub subscriptions
+            eventsub_url = "https://api.twitch.tv/helix/eventsub/subscriptions"
+            async with aiohttp.ClientSession() as session:
+                async with session.get(eventsub_url, headers=headers) as resp:
+                    sub_data = await resp.json()
+                    active_subs = set()
+                    for sub in sub_data.get("data", []):
+                        if sub["type"] == "channel.raid":
+                            active_subs.add(sub["condition"]["broadcaster_user_id"])
+
+            # Create missing subscriptions
+            for username, user_id in user_ids.items():
+                if user_id not in active_subs:
+                    payload = {
+                        "type": "channel.raid",
+                        "version": "1",
+                        "condition": {"broadcaster_user_id": user_id},
+                        "transport": {
+                            "method": "webhook",
+                            "callback": WEBHOOK_URL + "/eventsub",
+                            "secret": EVENTSUB_SECRET
+                        }
+                    }
+                    async with aiohttp.ClientSession() as session:
+                        async with session.post(eventsub_url, headers=headers, json=payload) as resp:
+                            if resp.status == 202:
+                                logger.info(f"[EventSub] Created subscription for {username} ({user_id})")
+                            else:
+                                logger.warning(f"[EventSub] Failed to create subscription for {username}: {await resp.text()}")
+        except Exception as exc:
+            logger.error(f"[EventSub] Subscription manager error: {exc}")
+        await asyncio.sleep(600)  # Run every 10 minutes
 # ---- SLASH COMMANDS ---- #
 
 # Ensure slash commands are synced on startup
@@ -1203,7 +1268,9 @@ async def check_live_streams():
             await channel.send(embed=embed)
 
             # Award chat points based on post-stream chat counts
+            logger.info(f"[StreamEnd] Awarding chat points for streamer '{twitch_username}' (discord_id={discord_id})")
             for chatter_id, count in chatters.items():
+                logger.info(f"[StreamEnd] Awarding chat points: chatter_id={chatter_id}, streamer_twitch_username={twitch_username}, count={count}")
                 await award_chat_points(conn, chatter_id, twitch_username, count)
 
         stream_chat_counts.pop(twitch_username, None)
@@ -1384,6 +1451,10 @@ async def main():
         check_live_streams.start()
     if not auto_post_currently_live.is_running():
         auto_post_currently_live.start()
+
+    # Start EventSub subscription manager as a background task
+    loop = asyncio.get_running_loop()
+    loop.create_task(ensure_eventsub_subscriptions())
 
     # Start Discord bot
     try:
