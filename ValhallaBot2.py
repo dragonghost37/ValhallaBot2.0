@@ -1114,12 +1114,7 @@ class TwitchBot(twitch_commands.Bot):
             self.chat_counts[streamer][discord_chatter] += 1
             logger.info(f"[TwitchBot] Chat event: chatter={chatter} (discord_id={discord_chatter}), streamer={streamer} (discord_id={discord_streamer}), count={self.chat_counts[streamer][discord_chatter]}")
             await log_chat(discord_chatter, discord_streamer)
-            # Award chat points based on streamer's rank
-            try:
-                async with await psycopg.AsyncConnection.connect(POSTGRES_URL) as conn:
-                    await award_chat_points(conn, discord_chatter, streamer, count=1)
-            except Exception as e:
-                logger.error(f"[TwitchBot] Error awarding chat points: {e}")
+            # Points will be awarded when the stream ends, not in real time
 
 async def log_chat(chatter_discord_id, streamer_discord_id):
     async with await psycopg.AsyncConnection.connect(POSTGRES_URL) as conn:
@@ -1265,6 +1260,16 @@ async def check_live_streams():
                     rank = row[0]
             
             color = rank_colors.get(rank, 0x7289DA)
+
+            # Award chat points to all chatters now that the stream has ended
+            for chatter_id, chat_count in chatters.items():
+                try:
+                    async with conn.cursor() as cur_award:
+                        await award_chat_points(conn, chatter_id, twitch_username, count=chat_count)
+                except Exception as e:
+                    logger.error(f"[Stream End] Error awarding chat points to {chatter_id} for streamer {twitch_username}: {e}")
+            # After awarding, reset chat counts for this streamer
+            stream_chat_counts[twitch_username] = {}
 
             # Handle raids sent - post points awarded messages
             raids_sent = stream_raids_sent.pop(twitch_username, [])
