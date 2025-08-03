@@ -322,7 +322,24 @@ async def handle_eventsub(request):
                     raider_row = await cur.fetchone()
                     await cur.execute("SELECT discord_id FROM users WHERE twitch_username = %s", (target,))
                     target_row = await cur.fetchone()
-                    # Record the raid in the database with viewers if both linked
+                    # Award points and record raid if both are linked
+                    channel = discord.utils.get(bot.get_all_channels(), name="╡stream-summaries")
+                    bot_commands_channel = discord.utils.get(bot.get_all_channels(), name="╡bot-commands")
+                    # Use Discord display names if both are linked
+                    raider_mention = f"`{raider}`"
+                    target_mention = f"`{target}`"
+                    if raider_row:
+                        for guild in bot.guilds:
+                            member = guild.get_member(int(raider_row[0]))
+                            if member:
+                                raider_mention = member.display_name
+                                break
+                    if target_row:
+                        for guild in bot.guilds:
+                            member = guild.get_member(int(target_row[0]))
+                            if member:
+                                target_mention = member.display_name
+                                break
                     if raider_row and target_row:
                         try:
                             await cur.execute(
@@ -331,14 +348,42 @@ async def handle_eventsub(request):
                             )
                             await conn.commit()
                             logger.info(f"[EventSub] Raid recorded in DB: raider_id={raider_row[0]}, target_id={target_row[0]}, viewers={viewers}")
+                            # Award points: 10 points per viewer
+                            points_awarded = viewers * 10
+                            await cur.execute(
+                                "UPDATE users SET points = points + %s WHERE discord_id = %s",
+                                (points_awarded, raider_row[0])
+                            )
+                            await conn.commit()
+                            # Optionally update rank
+                            await update_user_rank(conn, raider_row[0])
+                            # Notify in stream-summaries
+                            if channel:
+                                await channel.send(f"⚔️ {raider_mention} raided {target_mention} with {viewers} viewer{'s' if viewers != 1 else ''}! 🏅 Awarded {points_awarded} points.")
                         except Exception as db_exc:
                             logger.error(f"[EventSub] Error recording raid in DB: {db_exc}")
-                    # Always post a message in ╡stream-summaries for every raid event
-                    channel = discord.utils.get(bot.get_all_channels(), name="╡stream-summaries")
-                    raider_mention = f"<@{raider_row[0]}>" if raider_row else f"`{raider}`"
-                    target_mention = f"<@{target_row[0]}>" if target_row else f"`{target}`"
-                    if channel:
-                        await channel.send(f"⚔️ {raider_mention} raided {target_mention} with {viewers} viewer{'s' if viewers != 1 else ''}!")
+                    elif raider_row and not target_row:
+                        # Target not linked, send warning in bot-commands
+                        if bot_commands_channel:
+                            await bot_commands_channel.send(
+                                f"{raider_mention} raided {target} with {viewers} viewer{'s' if viewers != 1 else ''} but was NOT awarded {viewers * 10} points since {target} is not a registered streamer in this Discord. "
+                                f"Consider referring them here and earn 200 points once they reach 300 points!"
+                            )
+                        # Still post in stream-summaries for visibility
+                        if channel:
+                            await channel.send(f"⚔️ {raider_mention} raided `{target}` with {viewers} viewer{'s' if viewers != 1 else ''}!")
+                    elif not raider_row and target_row:
+                        # Raider not linked, send warning in bot-commands
+                        if bot_commands_channel:
+                            await bot_commands_channel.send(f"⚠️ Raid received from Twitch user `{raider}` to {target_mention} ({viewers} viewers), but raider is not linked to Discord. No points awarded.")
+                        if channel:
+                            await channel.send(f"⚔️ `{raider}` raided {target_mention} with {viewers} viewer{'s' if viewers != 1 else ''}!")
+                    else:
+                        # Neither linked, send warning in bot-commands
+                        if bot_commands_channel:
+                            await bot_commands_channel.send(f"⚠️ Raid received from Twitch user `{raider}` to Twitch user `{target}` ({viewers} viewers), but neither are linked to Discord. No points awarded.")
+                        if channel:
+                            await channel.send(f"⚔️ `{raider}` raided `{target}` with {viewers} viewer{'s' if viewers != 1 else ''}!")
         except Exception as exc:
             logger.error(f"[EventSub] Exception in raid handler: {exc}")
     return web.Response(text="OK")
@@ -401,6 +446,42 @@ async def award_chat_points(conn, chatter_discord_id, streamer_twitch_username, 
 
         if recent_points >= 100:
             logger.info(f"[award_chat_points] User {chatter_discord_id} already maxed out for streamer {streamer_id} in 48h window.")
+            # Notify the user they have reached the max points for this streamer
+            # Fetch Discord member objects
+            chatter_member = None
+            streamer_member = None
+            streamer_display_name = streamer_twitch_username
+            for guild in bot.guilds:
+                chatter_member = guild.get_member(int(chatter_discord_id))
+                streamer_member = guild.get_member(int(streamer_id))
+                if streamer_member:
+                    streamer_display_name = streamer_member.display_name
+                if chatter_member:
+                    break
+            # If not found, try fetch_user
+            if not streamer_member:
+                try:
+                    streamer_member = await bot.fetch_user(int(streamer_id))
+                    streamer_display_name = streamer_member.display_name
+                except Exception:
+                    pass
+            if not chatter_member:
+                try:
+                    chatter_member = await bot.fetch_user(int(chatter_discord_id))
+                except Exception:
+                    pass
+            # Send public message to bot-commands channel
+            channel = discord.utils.get(bot.get_all_channels(), name="╡bot-commands")
+            message = (
+                f"<@{chatter_discord_id}>, you have reached the max amount of points you can earn per 48hrs for chatting in {streamer_display_name}'s stream.\n"
+                f"You are limited to only earning points for up to 100 chats per streamer per 48 hours.\n"
+                f"Please go support other streamers in the community to continue earning points!"
+            )
+            if channel:
+                try:
+                    await channel.send(message)
+                except Exception:
+                    logger.warning(f"[award_chat_points] Could not send public message for user {chatter_discord_id}")
             return  # Already maxed out for this streamer in this window
 
         points_to_award = min(total_points, 100 - recent_points)
@@ -1033,6 +1114,12 @@ class TwitchBot(twitch_commands.Bot):
             self.chat_counts[streamer][discord_chatter] += 1
             logger.info(f"[TwitchBot] Chat event: chatter={chatter} (discord_id={discord_chatter}), streamer={streamer} (discord_id={discord_streamer}), count={self.chat_counts[streamer][discord_chatter]}")
             await log_chat(discord_chatter, discord_streamer)
+            # Award chat points based on streamer's rank
+            try:
+                async with await psycopg.AsyncConnection.connect(POSTGRES_URL) as conn:
+                    await award_chat_points(conn, discord_chatter, streamer, count=1)
+            except Exception as e:
+                logger.error(f"[TwitchBot] Error awarding chat points: {e}")
 
 async def log_chat(chatter_discord_id, streamer_discord_id):
     async with await psycopg.AsyncConnection.connect(POSTGRES_URL) as conn:
@@ -1183,19 +1270,33 @@ async def check_live_streams():
             raids_sent = stream_raids_sent.pop(twitch_username, [])
             for target, viewers, points in raids_sent:
                 target_id = twitch_to_discord.get(target)
-                streamer_mention = f"<@{discord_id}>"
-                target_mention = f"<@{target_id}>" if target_id else target
+                # Get display names for streamer and target
+                streamer_name = twitch_username
+                target_name = target
+                for guild in bot.guilds:
+                    member = guild.get_member(int(discord_id))
+                    if member:
+                        streamer_name = member.display_name
+                        break
+                if target_id:
+                    for guild in bot.guilds:
+                        member = guild.get_member(int(target_id))
+                        if member:
+                            target_name = member.display_name
+                            break
                 streamer_url = f"https://twitch.tv/{twitch_username}"
                 target_url = f"https://twitch.tv/{target}"
                 if channel:
                     if points == 0:
                         await channel.send(
-                            f"{streamer_mention}: You raided {target_mention} ({target_url}) with {viewers} viewers but were **NOT** awarded {viewers*10} points since they are not a registered streamer in this Discord. "
-                            "Consider inviting them to join Valhalla and use `/refer` to earn 200 points once they reach 400 points!"
+                            f"⚠️ {streamer_name} raided {target_name} with {viewers} viewers, but no points were awarded because the target is not linked.\n"
+                            f"🔗 [{streamer_name}]({streamer_url}) → [{target}]({target_url})"
                         )
                     else:
                         await channel.send(
-                            f"{streamer_mention} ({streamer_url}) just raided {target_mention} ({target_url}) with {viewers} viewers and was awarded {points} points!"
+                            f"⚔️ {streamer_name} raided {target_name} with {viewers} viewers!\n"
+                            f"{streamer_name} earned **{points} points** for this raid.\n"
+                            f"🔗 [{streamer_name}]({streamer_url}) → [{target_name}]({target_url})"
                         )
 
             # Build stream summary embed
