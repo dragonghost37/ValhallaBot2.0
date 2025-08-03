@@ -357,9 +357,16 @@ async def handle_eventsub(request):
                             await conn.commit()
                             # Optionally update rank
                             await update_user_rank(conn, raider_row[0])
+                            # Query raid count in last 30 days
+                            await cur.execute(
+                                "SELECT COUNT(*) FROM raids WHERE raider_id = %s AND target_id = %s AND timestamp >= (NOW() - INTERVAL '30 days')",
+                                (raider_row[0], target_row[0])
+                            )
+                            raid_count_row = await cur.fetchone()
+                            raid_count = raid_count_row[0] if raid_count_row else 0
                             # Notify in stream-summaries
                             if channel:
-                                await channel.send(f"⚔️ {raider_mention} raided {target_mention} with {viewers} viewer{'s' if viewers != 1 else ''}! 🏅 Awarded {points_awarded} points.")
+                                await channel.send(f"⚔️ {raider_mention} raided {target_mention} with {viewers} viewer{'s' if viewers != 1 else ''}! 🏅 Awarded {points_awarded} points. (Raided {target_mention} {raid_count}x/5 in last 30 days)")
                         except Exception as db_exc:
                             logger.error(f"[EventSub] Error recording raid in DB: {db_exc}")
                     elif raider_row and not target_row:
@@ -966,7 +973,7 @@ async def help_slash(interaction: discord.Interaction):
     embed.add_field(name="/rank", value="Show your current Valhalla rank.", inline=False)
     embed.add_field(name="/mypoints", value="Show your current points and rank.", inline=False)
     embed.add_field(name="/leaderboard", value="Show top 50 warriors.", inline=False)
-    embed.add_field(name="/stats", value="Show your Valhalla Warrior stats.", inline=False)
+    embed.add_field(name="/stats", value="See your Valhalla Warrior stats.", inline=False)
     await interaction.response.send_message(embed=embed, ephemeral=True)
 
 @bot.tree.command(name="howtouse", description="Show how to use ValhallaBot")
@@ -1293,9 +1300,11 @@ async def check_live_streams():
                 target_url = f"https://twitch.tv/{target}"
                 if channel:
                     if points == 0:
+                        # Calculate points that would have been awarded
+                        points_would_be_awarded = viewers * 10
                         await channel.send(
-                            f"⚠️ {streamer_name} raided {target_name} with {viewers} viewers, but no points were awarded because the target is not linked.\n"
-                            f"🔗 [{streamer_name}]({streamer_url}) → [{target}]({target_url})"
+                            f"@{streamer_name}: You raided {target_name} with {viewers} viewers but were NOT awarded {points_would_be_awarded} points since they are not a registered streamer in this Discord. "
+                            f"Consider referring them here and earn 200 points once they reach 400 points!"
                         )
                     else:
                         await channel.send(
