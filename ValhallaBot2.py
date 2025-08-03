@@ -322,10 +322,7 @@ async def handle_eventsub(request):
                     raider_row = await cur.fetchone()
                     await cur.execute("SELECT discord_id FROM users WHERE twitch_username = %s", (target,))
                     target_row = await cur.fetchone()
-                    channel = discord.utils.get(bot.get_all_channels(), name="╡bot-commands")
-                    points_awarded = 0
-                    logger.info(f"[EventSub] DB lookup: raider_row={raider_row}, target_row={target_row}")
-                    # Record the raid in the database with viewers
+                    # Record the raid in the database with viewers if both linked
                     if raider_row and target_row:
                         try:
                             await cur.execute(
@@ -336,18 +333,12 @@ async def handle_eventsub(request):
                             logger.info(f"[EventSub] Raid recorded in DB: raider_id={raider_row[0]}, target_id={target_row[0]}, viewers={viewers}")
                         except Exception as db_exc:
                             logger.error(f"[EventSub] Error recording raid in DB: {db_exc}")
-                    elif raider_row and not target_row:
-                        logger.warning(f"[EventSub] Target Twitch username '{target}' not linked to any Discord user.")
-                        if channel:
-                            await channel.send(f"⚠️ Raid received from `{raider}` to Twitch user `{target}` ({viewers} viewers), but target is not linked to Discord.")
-                    elif not raider_row and target_row:
-                        logger.warning(f"[EventSub] Raider Twitch username '{raider}' not linked to any Discord user.")
-                        if channel:
-                            await channel.send(f"⚠️ Raid received from Twitch user `{raider}` to `{target}` ({viewers} viewers), but raider is not linked to Discord.")
-                    else:
-                        logger.warning(f"[EventSub] Neither raider nor target Twitch usernames are linked to Discord users.")
-                        if channel:
-                            await channel.send(f"⚠️ Raid received from Twitch user `{raider}` to `{target}` ({viewers} viewers), but neither are linked to Discord.")
+                    # Always post a message in ╡stream-summaries for every raid event
+                    channel = discord.utils.get(bot.get_all_channels(), name="╡stream-summaries")
+                    raider_mention = f"<@{raider_row[0]}>" if raider_row else f"`{raider}`"
+                    target_mention = f"<@{target_row[0]}>" if target_row else f"`{target}`"
+                    if channel:
+                        await channel.send(f"⚔️ {raider_mention} raided {target_mention} with {viewers} viewer{'s' if viewers != 1 else ''}!")
         except Exception as exc:
             logger.error(f"[EventSub] Exception in raid handler: {exc}")
     return web.Response(text="OK")
