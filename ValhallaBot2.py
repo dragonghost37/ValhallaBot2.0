@@ -1393,62 +1393,8 @@ async def check_live_streams():
                     value=f"You sent {total_sent} raid{'s' if total_sent > 1 else ''} with {total_sent_viewers} viewer{'s' if total_sent_viewers != 1 else ''}\n" + ", ".join(target_names),
                     inline=False
                 )
+            # ...existing code...
 
-            # Chatters
-            if chatters:
-                chatter_mentions = " ".join(f"<@{chatter_id}>" for chatter_id in chatters.keys())
-                embed.add_field(
-                    name="Chatters",
-                    value=f"You received {total_chats} chats from Valhalla Warriors\n{chatter_mentions}",
-                    inline=False
-                )
-            else:
-                embed.add_field(name="Chatters", value="No chatters this stream.", inline=False)
-
-            # Raids Received
-            # Query the raids table for raids received during this stream session
-            async with conn.cursor() as cur:
-                # Get stream start and end times (approximate: last time user went live to now)
-                # For simplicity, use last 24 hours as the stream window
-                await cur.execute(
-                    "SELECT raider_id, viewers, timestamp FROM raids WHERE target_id = %s AND timestamp > NOW() - INTERVAL '24 hours'",
-                    (str(discord_id),)
-                )
-                db_raids = await cur.fetchall()
-            if db_raids:
-                total_raids = len(db_raids)
-                total_raid_viewers = sum(r[1] if len(r) > 1 and isinstance(r[1], int) else 0 for r in db_raids)
-                raider_mentions = " ".join(
-                    f"<@{r[0]}>" if r[0] else "Unknown"
-                    for r in db_raids
-                )
-                embed.add_field(
-                    name="Raids",
-                    value=f"You received {total_raids} raid{'s' if total_raids > 1 else ''} with {total_raid_viewers} viewer{'s' if total_raid_viewers != 1 else ''}\n{raider_mentions}",
-                    inline=False
-                )
-            else:
-                embed.add_field(name="Raids", value="No raids this stream.", inline=False)
-
-            # Raids Sent (summary only, now from DB)
-            async with conn.cursor() as cur:
-                await cur.execute(
-                    "SELECT target_id, viewers, timestamp FROM raids WHERE raider_id = %s AND timestamp > NOW() - INTERVAL '24 hours'",
-                    (str(discord_id),)
-                )
-                db_raids_sent = await cur.fetchall()
-            if db_raids_sent:
-                total_sent = len(db_raids_sent)
-                total_sent_viewers = sum(r[1] if len(r) > 1 and isinstance(r[1], int) else 0 for r in db_raids_sent)
-                target_mentions = " ".join(
-                    f"<@{r[0]}>" if r[0] else "Unknown"
-                    for r in db_raids_sent
-                )
-                embed.add_field(
-                    name="Raids Sent",
-                    value=f"You sent {total_sent} raid{'s' if total_sent > 1 else ''} with {total_sent_viewers} viewer{'s' if total_sent_viewers != 1 else ''}\n{target_mentions}",
-                    inline=False
-                )
             embed.timestamp = datetime.now(timezone.utc)
             embed.set_footer(text="\nᚠᚢᚾᛖᚱᚨᛚᚠᚢᚾᛖᚱᚨᛚ\nSkål for your efforts in Valhalla!\nᚠᚢᚾᛖᚱᚨᛚᚠᚢᚾᛖᚱᚨᛚ\n")
 
