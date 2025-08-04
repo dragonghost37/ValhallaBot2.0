@@ -1258,14 +1258,12 @@ async def check_live_streams():
                 if member:
                     streamer_name = member.display_name
                     break
-            
             # Fetch rank from DB
             async with conn.cursor() as cur3:
                 await cur3.execute("SELECT rank FROM users WHERE discord_id = %s", (str(discord_id),))
                 row = await cur3.fetchone()
                 if row:
                     rank = row[0]
-            
             color = rank_colors.get(rank, 0x7289DA)
 
             # Award chat points to all chatters now that the stream has ended
@@ -1338,11 +1336,27 @@ async def check_live_streams():
             else:
                 embed.add_field(name="Chatters", value="No chatters this stream.", inline=False)
 
-            # Raids Received
+            # Get stream session times (approximate)
+            # Use the time the streamer went live (from currently_live set) and now as the window
+            # For simplicity, use the last time the streamer was detected as live
+            # You may want to store actual start times in the future
+            stream_end = datetime.now(timezone.utc)
+            # Try to get stream start from stream_info if available
+            stream_start = None
+            if twitch_username in stream_info and 'started_at' in stream_info[twitch_username]:
+                started_at_str = stream_info[twitch_username]['started_at']
+                try:
+                    stream_start = datetime.fromisoformat(started_at_str.replace('Z', '+00:00'))
+                except Exception:
+                    stream_start = stream_end - timedelta(hours=4)  # fallback
+            else:
+                stream_start = stream_end - timedelta(hours=4)  # fallback
+
+            # Raids Received (only during stream session)
             async with conn.cursor() as cur:
                 await cur.execute(
-                    "SELECT raider_id, viewers, timestamp FROM raids WHERE target_id = %s AND timestamp > NOW() - INTERVAL '24 hours'",
-                    (str(discord_id),)
+                    "SELECT raider_id, viewers, timestamp FROM raids WHERE target_id = %s AND timestamp >= %s AND timestamp <= %s",
+                    (str(discord_id), stream_start, stream_end)
                 )
                 db_raids = await cur.fetchall()
             if db_raids:
@@ -1351,7 +1365,6 @@ async def check_live_streams():
                 raider_names = []
                 for r in db_raids:
                     raider_id = r[0]
-                    # Always map broadcaster to broadcaster (Discord ID to display name)
                     name = f"User({raider_id})"
                     for guild in bot.guilds:
                         member = guild.get_member(int(raider_id))
@@ -1367,11 +1380,11 @@ async def check_live_streams():
             else:
                 embed.add_field(name="Raids", value="No raids this stream.", inline=False)
 
-            # Raids Sent
+            # Raids Sent (only during stream session)
             async with conn.cursor() as cur:
                 await cur.execute(
-                    "SELECT target_id, viewers, timestamp FROM raids WHERE raider_id = %s AND timestamp > NOW() - INTERVAL '24 hours'",
-                    (str(discord_id),)
+                    "SELECT target_id, viewers, timestamp FROM raids WHERE raider_id = %s AND timestamp >= %s AND timestamp <= %s",
+                    (str(discord_id), stream_start, stream_end)
                 )
                 db_raids_sent = await cur.fetchall()
             if db_raids_sent:
@@ -1380,7 +1393,6 @@ async def check_live_streams():
                 target_names = []
                 for r in db_raids_sent:
                     target_id = r[0]
-                    # Always map broadcaster to broadcaster (Discord ID to display name)
                     name = f"User({target_id})"
                     for guild in bot.guilds:
                         member = guild.get_member(int(target_id))
@@ -1412,7 +1424,6 @@ async def check_live_streams():
                     count = chatter_row[1]
                     logger.info(f"[StreamEnd] Awarding chat points: chatter_id={chatter_id}, streamer_twitch_username={twitch_username}, count={count}")
                     await award_chat_points(conn, chatter_id, twitch_username, count)
-                    # Always update rank after awarding points
                     await update_user_rank(conn, chatter_id)
 
         stream_chat_counts.pop(twitch_username, None)
