@@ -222,29 +222,92 @@ async def update_user_points(discord_id=None, twitch_username=None, points_to_ad
 
 async def get_user_rank(points):
     """Calculate rank based on points"""
-    if points >= 500:
-        return "Einherjar"
-    elif points >= 200:
-        return "Drengr" 
-    elif points >= 75:
-        return "Huscarl"
-    elif points >= 25:
-        return "Karl"
-    else:
-        return "Thrall"
+    # This function is deprecated; ranks are now assigned by percentile only.
+    # Always return None to force percentile-based assignment.
+    return None
 
 async def update_user_rank(conn, discord_id):
     """Update user rank based on current points"""
+    # Only use percentile-based rank assignment
     async with conn.cursor() as cur:
-        await cur.execute("SELECT points FROM users WHERE discord_id = %s", (str(discord_id),))
-        result = await cur.fetchone()
-        if result:
-            points = result[0]
-            new_rank = await get_user_rank(points)
-            await cur.execute(
-                "UPDATE users SET rank = %s WHERE discord_id = %s",
-                (new_rank, str(discord_id))
+        await cur.execute("SELECT discord_id, points FROM users ORDER BY points DESC")
+        users = await cur.fetchall()
+        total_users = len(users)
+        if total_users == 0:
+            return
+
+        # Find this user's position (1-based)
+        user_points = None
+        user_rank_index = None
+        for idx, user in enumerate(users):
+            if user[0] == str(discord_id):
+                user_points = user[1]
+                user_rank_index = idx + 1
+                break
+        if user_points is None:
+            return
+
+    await cur.execute("SELECT rank FROM users WHERE discord_id = %s", (discord_id,))
+    old_rank_row = await cur.fetchone()
+    old_rank = old_rank_row[0] if old_rank_row else "Thrall"
+
+    # Calculate percentiles
+    percentile = user_rank_index / total_users
+
+    if percentile <= 0.05:
+        new_rank = "Allfather"          # Top 5%
+    elif percentile <= 0.15:
+        new_rank = "Chieftain"          # Top 5–15%
+    elif percentile <= 0.30:
+        new_rank = "Jarl"               # Top 15–30%
+    elif percentile <= 0.50:
+        new_rank = "Berserker"          # Top 30–50%
+    elif percentile <= 0.80:
+        new_rank = "Raider"             # Top 50–80%
+    else:
+        new_rank = "Thrall"             # Bottom 20%
+
+    # Only update rank and post message if rank actually changes
+    if new_rank != old_rank:
+        await cur.execute("UPDATE users SET rank = %s WHERE discord_id = %s", (new_rank, discord_id))
+        # Notify in ╡bot-commands
+        channel = discord.utils.get(bot.get_all_channels(), name="╡bot-commands")
+        if channel:
+            rank_order = ["Thrall", "Raider", "Berserker", "Jarl", "Chieftain", "Allfather"]
+            if rank_order.index(new_rank) > rank_order.index(old_rank):
+                action = "promoted to"
+            else:
+                action = "demoted to"
+            await channel.send(
+                f"🎉 <@{discord_id}> has been **{action} {new_rank}**!"
             )
+
+        # Assign Discord role
+        member = None
+        for guild in bot.guilds:
+            member = guild.get_member(int(discord_id))
+            if not member:
+                try:
+                    member = await guild.fetch_member(int(discord_id))
+                except Exception:
+                    continue
+            if member:
+                break
+        if member:
+            role_names = ["Thrall", "Raider", "Berserker", "Jarl", "Chieftain", "Allfather"]
+            roles = {r.name: r for r in member.guild.roles if r.name in role_names}
+            current_roles = [r for r in member.roles if r.name in role_names]
+            for r in current_roles:
+                try:
+                    await member.remove_roles(r)
+                except Exception as e:
+                    logger.exception(f"Error removing role {r.name} from {member.display_name}:")
+            new_role = roles.get(new_rank)
+            if new_role:
+                try:
+                    await member.add_roles(new_role)
+                except Exception:
+                    pass
 
 async def record_chat_point(chatter_id, streamer_id, points_awarded):
     """Record chat points for analytics"""
@@ -366,7 +429,7 @@ async def handle_eventsub(request):
                             raid_count = raid_count_row[0] if raid_count_row else 0
                             # Notify in stream-summaries
                             if channel:
-                                await channel.send(f"⚔️ {raider_mention} raided {target_mention} with {viewers} viewer{'s' if viewers != 1 else ''}! 🏅 Awarded {points_awarded} points. (Raided {target_mention} {raid_count}x/5 in last 30 days)")
+                                await channel.send(f"⚔️ {raider_mention} raided {target_mention} with {viewers} viewer{'s' if viewers != 1 else ''}! 🏅 and was Awarded {points_awarded} points. (Raided {target_mention} {raid_count}/5 in last 30 days)")
                         except Exception as db_exc:
                             logger.error(f"[EventSub] Error recording raid in DB: {db_exc}")
                     elif raider_row and not target_row:
@@ -374,23 +437,16 @@ async def handle_eventsub(request):
                         if bot_commands_channel:
                             await bot_commands_channel.send(
                                 f"{raider_mention} raided {target} with {viewers} viewer{'s' if viewers != 1 else ''} but was NOT awarded {viewers * 10} points since {target} is not a registered streamer in this Discord. "
-                                f"Consider referring them here and earn 200 points once they reach 300 points!"
+                                f"Consider referring them here and earn 200 points once they reach 400 points!"
                             )
-                        # Still post in stream-summaries for visibility
+                        # Always post in stream-summaries for visibility (single post)
                         if channel:
                             await channel.send(f"⚔️ {raider_mention} raided `{target}` with {viewers} viewer{'s' if viewers != 1 else ''}!")
-                    elif not raider_row and target_row:
-                        # Raider not linked, send warning in bot-commands
-                        if bot_commands_channel:
-                            await bot_commands_channel.send(f"⚠️ Raid received from Twitch user `{raider}` to {target_mention} ({viewers} viewers), but raider is not linked to Discord. No points awarded.")
-                        if channel:
-                            await channel.send(f"⚔️ `{raider}` raided {target_mention} with {viewers} viewer{'s' if viewers != 1 else ''}!")
-                    else:
-                        # Neither linked, send warning in bot-commands
-                        if bot_commands_channel:
-                            await bot_commands_channel.send(f"⚠️ Raid received from Twitch user `{raider}` to Twitch user `{target}` ({viewers} viewers), but neither are linked to Discord. No points awarded.")
-                        if channel:
-                            await channel.send(f"⚔️ `{raider}` raided `{target}` with {viewers} viewer{'s' if viewers != 1 else ''}!")
+                    # If raider is not linked, or neither are linked, do not post anything
+                    # elif not raider_row and target_row:
+                    #     pass
+                    # else:
+                    #     pass
         except Exception as exc:
             logger.error(f"[EventSub] Exception in raid handler: {exc}")
     return web.Response(text="OK")
@@ -558,39 +614,40 @@ async def update_user_rank(conn, discord_id):
         if user_points is None:
             return
 
-        await cur.execute("SELECT rank FROM users WHERE discord_id = %s", (discord_id,))
-        old_rank_row = await cur.fetchone()
-        old_rank = old_rank_row[0] if old_rank_row else "Thrall"
+    await cur.execute("SELECT rank FROM users WHERE discord_id = %s", (discord_id,))
+    old_rank_row = await cur.fetchone()
+    old_rank = old_rank_row[0] if old_rank_row else "Thrall"
 
-        # Calculate percentiles
-        percentile = user_rank_index / total_users
+    # Calculate percentiles
+    percentile = user_rank_index / total_users
 
-        if percentile <= 0.05:
-            new_rank = "Allfather"          # Top 5%
-        elif percentile <= 0.15:
-            new_rank = "Chieftain"          # Top 5–15%
-        elif percentile <= 0.30:
-            new_rank = "Jarl"               # Top 15–30%
-        elif percentile <= 0.50:
-            new_rank = "Berserker"          # Top 30–50%
-        elif percentile <= 0.80:
-            new_rank = "Raider"             # Top 50–80%
-        else:
-            new_rank = "Thrall"             # Bottom 20%
+    if percentile <= 0.05:
+        new_rank = "Allfather"          # Top 5%
+    elif percentile <= 0.15:
+        new_rank = "Chieftain"          # Top 5–15%
+    elif percentile <= 0.30:
+        new_rank = "Jarl"               # Top 15–30%
+    elif percentile <= 0.50:
+        new_rank = "Berserker"          # Top 30–50%
+    elif percentile <= 0.80:
+        new_rank = "Raider"             # Top 50–80%
+    else:
+        new_rank = "Thrall"             # Bottom 20%
 
-        if new_rank != old_rank:
-            await cur.execute("UPDATE users SET rank = %s WHERE discord_id = %s", (new_rank, discord_id))
-            # Notify in ╡bot-commands
-            channel = discord.utils.get(bot.get_all_channels(), name="╡bot-commands")
-            if channel:
-                rank_order = ["Thrall", "Raider", "Berserker", "Jarl", "Chieftain", "Allfather"]
-                if rank_order.index(new_rank) > rank_order.index(old_rank):
-                    action = "promoted to"
-                else:
-                    action = "demoted to"
-                await channel.send(
-                    f"🎉 <@{discord_id}> has been **{action} {new_rank}**!"
-                )
+    # Only update rank and post message if rank actually changes
+    if new_rank != old_rank:
+        await cur.execute("UPDATE users SET rank = %s WHERE discord_id = %s", (new_rank, discord_id))
+        # Notify in ╡bot-commands
+        channel = discord.utils.get(bot.get_all_channels(), name="╡bot-commands")
+        if channel:
+            rank_order = ["Thrall", "Raider", "Berserker", "Jarl", "Chieftain", "Allfather"]
+            if rank_order.index(new_rank) > rank_order.index(old_rank):
+                action = "promoted to"
+            else:
+                action = "demoted to"
+            await channel.send(
+                f"🎉 <@{discord_id}> has been **{action} {new_rank}**!"
+            )
 
         # Assign Discord role
         member = None
@@ -1269,7 +1326,7 @@ async def check_live_streams():
             # Award chat points to all chatters now that the stream has ended
             for chatter_id, chat_count in chatters.items():
                 try:
-                    async with conn.cursor() as cur_award:
+                    async with conn.cursor() as cur:
                         await award_chat_points(conn, chatter_id, twitch_username, count=chat_count)
                 except Exception as e:
                     logger.error(f"[Stream End] Error awarding chat points to {chatter_id} for streamer {twitch_username}: {e}")
@@ -1336,95 +1393,91 @@ async def check_live_streams():
             else:
                 embed.add_field(name="Chatters", value="No chatters this stream.", inline=False)
 
-            # Get stream session times (approximate)
-            # Use the time the streamer went live (from currently_live set) and now as the window
-            # For simplicity, use the last time the streamer was detected as live
-            # You may want to store actual start times in the future
-            stream_end = datetime.now(timezone.utc)
-            # Try to get stream start from stream_info if available
-            stream_start = None
-            if twitch_username in stream_info and 'started_at' in stream_info[twitch_username]:
-                started_at_str = stream_info[twitch_username]['started_at']
-                try:
-                    stream_start = datetime.fromisoformat(started_at_str.replace('Z', '+00:00'))
-                except Exception:
-                    stream_start = stream_end - timedelta(hours=4)  # fallback
-            else:
+        # Get stream session times (approximate)
+        stream_end = datetime.now(timezone.utc)
+        stream_start = None
+        if twitch_username in stream_info and 'started_at' in stream_info[twitch_username]:
+            started_at_str = stream_info[twitch_username]['started_at']
+            try:
+                stream_start = datetime.fromisoformat(started_at_str.replace('Z', '+00:00'))
+            except Exception:
                 stream_start = stream_end - timedelta(hours=4)  # fallback
+        else:
+            stream_start = stream_end - timedelta(hours=4)  # fallback
 
-            # Raids Received (only during stream session)
-            async with conn.cursor() as cur:
-                await cur.execute(
-                    "SELECT raider_id, viewers, timestamp FROM raids WHERE target_id = %s AND timestamp >= %s AND timestamp <= %s",
-                    (str(discord_id), stream_start, stream_end)
-                )
-                db_raids = await cur.fetchall()
-            if db_raids:
-                total_raids = len(db_raids)
-                total_raid_viewers = sum(r[1] if len(r) > 1 and isinstance(r[1], int) else 0 for r in db_raids)
-                raider_names = []
-                for r in db_raids:
-                    raider_id = r[0]
-                    name = f"User({raider_id})"
-                    for guild in bot.guilds:
-                        member = guild.get_member(int(raider_id))
-                        if member:
-                            name = member.display_name
-                            break
-                    raider_names.append(name)
-                embed.add_field(
-                    name="Raids",
-                    value=f"You received {total_raids} raid{'s' if total_raids > 1 else ''} with {total_raid_viewers} viewer{'s' if total_raid_viewers != 1 else ''}\n" + ", ".join(raider_names),
-                    inline=False
-                )
-            else:
-                embed.add_field(name="Raids", value="No raids this stream.", inline=False)
+        # Raids Received (only during stream session)
+        async with conn.cursor() as cur:
+            await cur.execute(
+                "SELECT raider_id, viewers, timestamp FROM raids WHERE target_id = %s AND timestamp >= %s AND timestamp <= %s",
+                (str(discord_id), stream_start, stream_end)
+            )
+            db_raids = await cur.fetchall()
+        if db_raids:
+            total_raids = len(db_raids)
+            total_raid_viewers = sum(r[1] if len(r) > 1 and isinstance(r[1], int) else 0 for r in db_raids)
+            raider_names = []
+            for r in db_raids:
+                raider_id = r[0]
+                name = f"User({raider_id})"
+                for guild in bot.guilds:
+                    member = guild.get_member(int(raider_id))
+                    if member:
+                        name = member.display_name
+                        break
+                raider_names.append(name)
+            embed.add_field(
+                name="Raids",
+                value=f"You received {total_raids} raid{'s' if total_raids > 1 else ''} with {total_raid_viewers} viewer{'s' if total_raid_viewers != 1 else ''}\n" + ", ".join(raider_names),
+                inline=False
+            )
+        else:
+            embed.add_field(name="Raids", value="No raids this stream.", inline=False)
 
-            # Raids Sent (only during stream session)
-            async with conn.cursor() as cur:
-                await cur.execute(
-                    "SELECT target_id, viewers, timestamp FROM raids WHERE raider_id = %s AND timestamp >= %s AND timestamp <= %s",
-                    (str(discord_id), stream_start, stream_end)
-                )
-                db_raids_sent = await cur.fetchall()
-            if db_raids_sent:
-                total_sent = len(db_raids_sent)
-                total_sent_viewers = sum(r[1] if len(r) > 1 and isinstance(r[1], int) else 0 for r in db_raids_sent)
-                target_names = []
-                for r in db_raids_sent:
-                    target_id = r[0]
-                    name = f"User({target_id})"
-                    for guild in bot.guilds:
-                        member = guild.get_member(int(target_id))
-                        if member:
-                            name = member.display_name
-                            break
-                    target_names.append(name)
-                embed.add_field(
-                    name="Raids Sent",
-                    value=f"You sent {total_sent} raid{'s' if total_sent > 1 else ''} with {total_sent_viewers} viewer{'s' if total_sent_viewers != 1 else ''}\n" + ", ".join(target_names),
-                    inline=False
-                )
-            # ...existing code...
+        # Raids Sent (only during stream session)
+        async with conn.cursor() as cur:
+            await cur.execute(
+                "SELECT target_id, viewers, timestamp FROM raids WHERE raider_id = %s AND timestamp >= %s AND timestamp <= %s",
+                (str(discord_id), stream_start, stream_end)
+            )
+            db_raids_sent = await cur.fetchall()
+        if db_raids_sent:
+            total_sent = len(db_raids_sent)
+            total_sent_viewers = sum(r[1] if len(r) > 1 and isinstance(r[1], int) else 0 for r in db_raids_sent)
+            target_names = []
+            for r in db_raids_sent:
+                target_id = r[0]
+                name = f"User({target_id})"
+                for guild in bot.guilds:
+                    member = guild.get_member(int(target_id))
+                    if member:
+                        name = member.display_name
+                        break
+                target_names.append(name)
+            embed.add_field(
+                name="Raids Sent",
+                value=f"You sent {total_sent} raid{'s' if total_sent > 1 else ''} with {total_sent_viewers} viewer{'s' if total_sent_viewers != 1 else ''}\n" + ", ".join(target_names),
+                inline=False
+            )
+        # ...existing code...
 
-            embed.timestamp = datetime.now(timezone.utc)
-            embed.set_footer(text="\nᚠᚢᚾᛖᚱᚨᛚᚠᚢᚾᛖᚱᚨᛚ\nSkål for your efforts in Valhalla!\nᚠᚢᚾᛖᚱᚨᛚᚠᚢᚾᛖᚱᚨᛚ\n")
+        embed.timestamp = datetime.now(timezone.utc)
+        embed.set_footer(text="\nᚠᚢᚾᛖᚱᚨᛚᚠᚢᚾᛖᚱᚨᛚ\nSkål for your efforts in Valhalla!\nᚠᚢᚾᛖᚱᚨᛚᚠᚢᚾᛖᚱᚨᛚ\n")
 
-            # Tag the streamer and send summary
-            await channel.send(f"Hey <@{discord_id}>, Awesome stream!")
-            await channel.send(embed=embed)
+        # Tag the streamer and send summary
+        await channel.send(f"Hey <@{discord_id}>, Awesome stream!")
+        await channel.send(embed=embed)
 
-            # Award chat points and update ranks for all users who chatted during the stream
-            logger.info(f"[StreamEnd] Awarding chat points and updating ranks for streamer '{twitch_username}' (discord_id={discord_id})")
-            async with conn.cursor() as cur_award:
-                await cur_award.execute("SELECT chatter_id, count FROM chats WHERE streamer_id = %s", (str(discord_id),))
-                all_chatters = await cur_award.fetchall()
-                for chatter_row in all_chatters:
-                    chatter_id = chatter_row[0]
-                    count = chatter_row[1]
-                    logger.info(f"[StreamEnd] Awarding chat points: chatter_id={chatter_id}, streamer_twitch_username={twitch_username}, count={count}")
-                    await award_chat_points(conn, chatter_id, twitch_username, count)
-                    await update_user_rank(conn, chatter_id)
+        # Award chat points and update ranks for all users who chatted during the stream
+        logger.info(f"[StreamEnd] Awarding chat points and updating ranks for streamer '{twitch_username}' (discord_id={discord_id})")
+        async with conn.cursor() as cur_award:
+            await cur_award.execute("SELECT chatter_id, count FROM chats WHERE streamer_id = %s", (str(discord_id),))
+            all_chatters = await cur_award.fetchall()
+            for chatter_row in all_chatters:
+                chatter_id = chatter_row[0]
+                count = chatter_row[1]
+                logger.info(f"[StreamEnd] Awarding chat points: chatter_id={chatter_id}, streamer_twitch_username={twitch_username}, count={count}")
+                await award_chat_points(conn, chatter_id, twitch_username, count)
+                await update_user_rank(conn, chatter_id)
 
         stream_chat_counts.pop(twitch_username, None)
     
