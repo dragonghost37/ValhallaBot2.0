@@ -1518,12 +1518,6 @@ async def check_live_streams():
     currently_live.clear()
     currently_live.update(live_now)
 
-        stream_chat_counts.pop(twitch_username, None)
-    
-    await conn.close()
-    currently_live.clear()
-    currently_live.update(live_now)
-
 
 @tasks.loop(minutes=1)
 async def auto_post_currently_live():
