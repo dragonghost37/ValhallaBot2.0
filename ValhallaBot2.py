@@ -484,84 +484,92 @@ async def root_handler(request):
 
 # ---- AWARD & RANK FUNCTIONS ---- #
 async def award_chat_points(conn, chatter_discord_id, streamer_twitch_username, count=1):
+    # Get streamer info
     async with conn.cursor() as cur:
         logger.info(f"[award_chat_points] Called with chatter_discord_id={chatter_discord_id}, streamer_twitch_username={streamer_twitch_username}, count={count}")
         await cur.execute("SELECT discord_id, rank FROM users WHERE twitch_username = %s", (streamer_twitch_username,))
         streamer_row = await cur.fetchone()
-        if not streamer_row:
-            logger.warning(f"[award_chat_points] Streamer Twitch username '{streamer_twitch_username}' not found in users table.")
-            return
-        streamer_id = streamer_row[0]
-        rank = streamer_row[1]
-        points_per_message = rank_points.get(rank, 1)
-        total_points = points_per_message * count
+    if not streamer_row:
+        logger.warning(f"[award_chat_points] Streamer Twitch username '{streamer_twitch_username}' not found in users table.")
+        return
+    streamer_id = streamer_row[0]
+    rank = streamer_row[1]
+    points_per_message = rank_points.get(rank, 1)
+    total_points = points_per_message * count
 
-        logger.info(f"[award_chat_points] Streamer_id={streamer_id}, rank={rank}, points_per_message={points_per_message}, total_points={total_points}")
+    logger.info(f"[award_chat_points] Streamer_id={streamer_id}, rank={rank}, points_per_message={points_per_message}, total_points={total_points}")
 
-        # Calculate points awarded in last 48 hours
+    # Calculate points awarded in last 48 hours
+    async with conn.cursor() as cur:
         await cur.execute("""
             SELECT COALESCE(SUM(points_awarded), 0)
             FROM chat_points
             WHERE chatter_id = %s AND streamer_id = %s AND timestamp > NOW() - INTERVAL '48 hours'
         """, (chatter_discord_id, streamer_id))
         recent_points = (await cur.fetchone())[0]
-        logger.info(f"[award_chat_points] Recent points in last 48h: {recent_points}")
+    logger.info(f"[award_chat_points] Recent points in last 48h: {recent_points}")
 
-        if recent_points >= 100:
-            logger.info(f"[award_chat_points] User {chatter_discord_id} already maxed out for streamer {streamer_id} in 48h window.")
-            # Notify the user they have reached the max points for this streamer
-            # Fetch Discord member objects
-            chatter_member = None
-            streamer_member = None
-            streamer_display_name = streamer_twitch_username
-            for guild in bot.guilds:
-                chatter_member = guild.get_member(int(chatter_discord_id))
-                streamer_member = guild.get_member(int(streamer_id))
-                if streamer_member:
-                    streamer_display_name = streamer_member.display_name
-                if chatter_member:
-                    break
-            # If not found, try fetch_user
-            if not streamer_member:
-                try:
-                    streamer_member = await bot.fetch_user(int(streamer_id))
-                    streamer_display_name = streamer_member.display_name
-                except Exception:
-                    pass
-            if not chatter_member:
-                try:
-                    chatter_member = await bot.fetch_user(int(chatter_discord_id))
-                except Exception:
-                    pass
-            # Send public message to bot-commands channel
-            channel = discord.utils.get(bot.get_all_channels(), name="╡bot-commands")
-            message = (
-                f"<@{chatter_discord_id}>, you have reached the max amount of points you can earn per 48hrs for chatting in {streamer_display_name}'s stream.\n"
-                f"You are limited to only earning points for up to 100 chats per streamer per 48 hours.\n"
-                f"Please go support other streamers in the community to continue earning points!"
-            )
-            if channel:
-                try:
-                    await channel.send(message)
-                except Exception:
-                    logger.warning(f"[award_chat_points] Could not send public message for user {chatter_discord_id}")
-            return  # Already maxed out for this streamer in this window
+    if recent_points >= 100:
+        logger.info(f"[award_chat_points] User {chatter_discord_id} already maxed out for streamer {streamer_id} in 48h window.")
+        # Notify the user they have reached the max points for this streamer
+        # Fetch Discord member objects
+        chatter_member = None
+        streamer_member = None
+        streamer_display_name = streamer_twitch_username
+        for guild in bot.guilds:
+            chatter_member = guild.get_member(int(chatter_discord_id))
+            streamer_member = guild.get_member(int(streamer_id))
+            if streamer_member:
+                streamer_display_name = streamer_member.display_name
+            if chatter_member:
+                break
+        # If not found, try fetch_user
+        if not streamer_member:
+            try:
+                streamer_member = await bot.fetch_user(int(streamer_id))
+                streamer_display_name = streamer_member.display_name
+            except Exception:
+                pass
+        if not chatter_member:
+            try:
+                chatter_member = await bot.fetch_user(int(chatter_discord_id))
+            except Exception:
+                pass
+        # Send public message to bot-commands channel
+        channel = discord.utils.get(bot.get_all_channels(), name="╡bot-commands")
+        message = (
+            f"<@{chatter_discord_id}>, you have reached the max amount of points you can earn per 48hrs for chatting in {streamer_display_name}'s stream.\n"
+            f"You are limited to only earning points for up to 100 chats per streamer per 48 hours.\n"
+            f"Please go support other streamers in the community to continue earning points!"
+        )
+        if channel:
+            try:
+                await channel.send(message)
+            except Exception:
+                logger.warning(f"[award_chat_points] Could not send public message for user {chatter_discord_id}")
+        return  # Already maxed out for this streamer in this window
 
-        points_to_award = min(total_points, 100 - recent_points)
-        logger.info(f"[award_chat_points] Calculated points_to_award={points_to_award}")
-        if points_to_award <= 0:
-            logger.info(f"[award_chat_points] No points to award for user {chatter_discord_id} in streamer {streamer_id} chat.")
-            return
+    points_to_award = min(total_points, 100 - recent_points)
+    logger.info(f"[award_chat_points] Calculated points_to_award={points_to_award}")
+    if points_to_award <= 0:
+        logger.info(f"[award_chat_points] No points to award for user {chatter_discord_id} in streamer {streamer_id} chat.")
+        return
 
+    # Award points
+    async with conn.cursor() as cur:
         await cur.execute("UPDATE users SET points = points + %s WHERE discord_id = %s", (points_to_award, chatter_discord_id))
-        await update_user_rank(conn, chatter_discord_id)
+        await conn.commit()
+    await update_user_rank(conn, chatter_discord_id)
+    # Record chat points
+    async with conn.cursor() as cur:
         await cur.execute("""
             INSERT INTO chat_points (chatter_id, streamer_id, points_awarded, timestamp)
             VALUES (%s, %s, %s, NOW())
         """, (chatter_discord_id, streamer_id, points_to_award))
-        logger.info(f"[award_chat_points] Awarded {points_to_award} points to user {chatter_discord_id} for chatting in streamer {streamer_id}'s stream.")
-        # Check for referral bonus milestone
-        await check_referral_bonus(conn, chatter_discord_id)
+        await conn.commit()
+    logger.info(f"[award_chat_points] Awarded {points_to_award} points to user {chatter_discord_id} for chatting in streamer {streamer_id}'s stream.")
+    # Check for referral bonus milestone
+    await check_referral_bonus(conn, chatter_discord_id)
 
 async def check_referral_bonus(conn, discord_id):
     """Check if user has reached 400 points and award referral bonus to their referrer"""
@@ -599,23 +607,25 @@ async def update_user_rank(conn, discord_id):
     async with conn.cursor() as cur:
         await cur.execute("SELECT discord_id, points FROM users ORDER BY points DESC")
         users = await cur.fetchall()
-        total_users = len(users)
-        if total_users == 0:
-            return
+    total_users = len(users)
+    if total_users == 0:
+        return
 
-        # Find this user's position (1-based)
-        user_points = None
-        user_rank_index = None
-        for idx, user in enumerate(users):
-            if user[0] == str(discord_id):
-                user_points = user[1]
-                user_rank_index = idx + 1
-                break
-        if user_points is None:
-            return
+    # Find this user's position (1-based)
+    user_points = None
+    user_rank_index = None
+    for idx, user in enumerate(users):
+        if user[0] == str(discord_id):
+            user_points = user[1]
+            user_rank_index = idx + 1
+            break
+    if user_points is None:
+        return
 
-    await cur.execute("SELECT rank FROM users WHERE discord_id = %s", (discord_id,))
-    old_rank_row = await cur.fetchone()
+    # Get old rank
+    async with conn.cursor() as cur:
+        await cur.execute("SELECT rank FROM users WHERE discord_id = %s", (discord_id,))
+        old_rank_row = await cur.fetchone()
     old_rank = old_rank_row[0] if old_rank_row else "Thrall"
 
     # Calculate percentiles
@@ -636,7 +646,9 @@ async def update_user_rank(conn, discord_id):
 
     # Only update rank and post message if rank actually changes
     if new_rank != old_rank:
-        await cur.execute("UPDATE users SET rank = %s WHERE discord_id = %s", (new_rank, discord_id))
+        async with conn.cursor() as cur:
+            await cur.execute("UPDATE users SET rank = %s WHERE discord_id = %s", (new_rank, discord_id))
+            await conn.commit()
         # Notify in ╡bot-commands
         channel = discord.utils.get(bot.get_all_channels(), name="╡bot-commands")
         if channel:
@@ -1302,6 +1314,64 @@ async def check_live_streams():
     # Handle ended streams
     ended_streams = currently_live - live_now
     for twitch_username in ended_streams:
+        discord_id = twitch_to_discord.get(twitch_username)
+        if not discord_id:
+            continue
+        # Gather stream summary data
+        # Get Discord member
+        member = None
+        for guild in bot.guilds:
+            member = guild.get_member(int(discord_id))
+            if member:
+                break
+        display_name = member.display_name if member else twitch_username
+        # Get chat stats for all linked users
+        chat_counts = []
+        async with conn.cursor() as cur:
+            await cur.execute("SELECT chatter_id, count FROM chats WHERE streamer_id = %s", (discord_id,))
+            chat_rows = await cur.fetchall()
+        for chatter_id, count in chat_rows:
+            chatter_name = f"User({chatter_id})"
+            for guild in bot.guilds:
+                chatter_member = guild.get_member(int(chatter_id))
+                if chatter_member:
+                    chatter_name = chatter_member.display_name
+                    break
+            chat_counts.append(f"<@{chatter_id}>: {count} chats")
+        # Get raid info
+        raids = stream_raids.get(twitch_username.lower(), [])
+        raid_lines = []
+        for raider, viewers, points_awarded in raids:
+            raid_lines.append(f"⚔️ {raider} raided with {viewers} viewers.")
+        # Compose embed
+        embed = Embed(
+            title=f"Stream Summary for {display_name}",
+            description=f"Stream ended for {display_name}. Here are the stats:",
+            color=rank_colors.get('Thrall', 0x7289DA)
+        )
+        embed.add_field(
+            name="Chatters",
+            value="\n".join(chat_counts) if chat_counts else "No chat data.",
+            inline=False
+        )
+        embed.add_field(
+            name="Raids Received",
+            value="\n".join(raid_lines) if raid_lines else "No raids received.",
+            inline=False
+        )
+        embed.timestamp = datetime.now(timezone.utc)
+        # Send to channel
+        channel = discord.utils.get(bot.get_all_channels(), name="╡stream-summaries")
+        if channel:
+            await channel.send(embed=embed)
+            # Post raid messages outside embed (one per raid)
+            for raider, viewers, points_awarded in raids:
+                await channel.send(f"⚔️ {raider} raided {display_name} with {viewers} viewer{'s' if viewers != 1 else ''}!")
+        # Clean up in-memory raids for this streamer
+        if twitch_username.lower() in stream_raids:
+            del stream_raids[twitch_username.lower()]
+    # Update currently_live
+    currently_live = live_now
         discord_id = twitch_to_discord.get(twitch_username)
         chatters = stream_chat_counts.get(twitch_username, {})
         total_chats = sum(chatters.values())
