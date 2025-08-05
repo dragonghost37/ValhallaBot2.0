@@ -1372,12 +1372,6 @@ async def check_live_streams():
             del stream_raids[twitch_username.lower()]
     # Update currently_live
     currently_live = live_now
-                    async with conn.cursor() as cur:
-                        await award_chat_points(conn, chatter_id, twitch_username, count=chat_count)
-                except Exception as e:
-                    logger.error(f"[Stream End] Error awarding chat points to {chatter_id} for streamer {twitch_username}: {e}")
-            # After awarding, reset chat counts for this streamer
-            stream_chat_counts[twitch_username] = {}
 
             # Handle raids sent - post points awarded messages
             raids_sent = stream_raids_sent.pop(twitch_username, [])
