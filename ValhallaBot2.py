@@ -1370,45 +1370,44 @@ async def check_live_streams():
         # Clean up in-memory raids for this streamer
         if twitch_username.lower() in stream_raids:
             del stream_raids[twitch_username.lower()]
-    # Update currently_live
-    currently_live = live_now
-
-            # Handle raids sent - post points awarded messages
-            raids_sent = stream_raids_sent.pop(twitch_username, [])
-            for target, viewers, points in raids_sent:
-                target_id = twitch_to_discord.get(target)
-                # Get display names for streamer and target
-                streamer_name = twitch_username
-                target_name = target
+        # Handle raids sent - post points awarded messages
+        raids_sent = stream_raids_sent.pop(twitch_username, [])
+        for target, viewers, points in raids_sent:
+            target_id = twitch_to_discord.get(target)
+            # Get display names for streamer and target
+            streamer_name = twitch_username
+            target_name = target
+            for guild in bot.guilds:
+                member = guild.get_member(int(discord_id))
+                if member:
+                    streamer_name = member.display_name
+                    break
+            if target_id:
                 for guild in bot.guilds:
-                    member = guild.get_member(int(discord_id))
+                    member = guild.get_member(int(target_id))
                     if member:
-                        streamer_name = member.display_name
+                        target_name = member.display_name
                         break
-                if target_id:
-                    for guild in bot.guilds:
-                        member = guild.get_member(int(target_id))
-                        if member:
-                            target_name = member.display_name
-                            break
-                streamer_url = f"https://twitch.tv/{twitch_username}"
-                target_url = f"https://twitch.tv/{target}"
-                if channel:
-                    if points == 0:
-                        # Calculate points that would have been awarded
-                        points_would_be_awarded = viewers * 10
-                        await channel.send(
-                            f"@{streamer_name}: You raided {target_name} with {viewers} viewers but were NOT awarded {points_would_be_awarded} points since they are not a registered streamer in this Discord. "
-                            f"Consider referring them here and earn 200 points once they reach 400 points!"
-                        )
-                    else:
-                        await channel.send(
-                            f"⚔️ {streamer_name} raided {target_name} with {viewers} viewers!\n"
-                            f"{streamer_name} earned **{points} points** for this raid.\n"
-                            f"🔗 [{streamer_name}]({streamer_url}) → [{target_name}]({target_url})"
-                        )
+            streamer_url = f"https://twitch.tv/{twitch_username}"
+            target_url = f"https://twitch.tv/{target}"
+            if channel:
+                if points == 0:
+                    # Calculate points that would have been awarded
+                    points_would_be_awarded = viewers * 10
+                    await channel.send(
+                        f"@{streamer_name}: You raided {target_name} with {viewers} viewers but were NOT awarded {points_would_be_awarded} points since they are not a registered streamer in this Discord. "
+                        f"Consider referring them here and earn 200 points once they reach 400 points!"
+                    )
+                else:
+                    await channel.send(
+                        f"⚔️ {streamer_name} raided {target_name} with {viewers} viewers!\n"
+                        f"{streamer_name} earned **{points} points** for this raid.\n"
+                        f"🔗 [{streamer_name}]({streamer_url}) → [{target_name}]({target_url})"
+                    )
+        # Update currently_live
+        currently_live = live_now
 
-            # Build stream summary embed
+        # Build stream summary embed
             embed = discord.Embed(
                 title=f"{streamer_name}'s Stream Summary",
                 color=color,
