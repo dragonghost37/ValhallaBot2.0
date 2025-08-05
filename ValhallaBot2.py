@@ -1372,30 +1372,6 @@ async def check_live_streams():
             del stream_raids[twitch_username.lower()]
     # Update currently_live
     currently_live = live_now
-        discord_id = twitch_to_discord.get(twitch_username)
-        chatters = stream_chat_counts.get(twitch_username, {})
-        total_chats = sum(chatters.values())
-        channel = discord.utils.get(bot.get_all_channels(), name="╡stream-summaries")
-        if channel and discord_id:
-            # Get streamer display name and rank
-            streamer_name = twitch_username
-            rank = "Unknown"
-            for guild in bot.guilds:
-                member = guild.get_member(int(discord_id))
-                if member:
-                    streamer_name = member.display_name
-                    break
-            # Fetch rank from DB
-            async with conn.cursor() as cur3:
-                await cur3.execute("SELECT rank FROM users WHERE discord_id = %s", (str(discord_id),))
-                row = await cur3.fetchone()
-                if row:
-                    rank = row[0]
-            color = rank_colors.get(rank, 0x7289DA)
-
-            # Award chat points to all chatters now that the stream has ended
-            for chatter_id, chat_count in chatters.items():
-                try:
                     async with conn.cursor() as cur:
                         await award_chat_points(conn, chatter_id, twitch_username, count=chat_count)
                 except Exception as e:
