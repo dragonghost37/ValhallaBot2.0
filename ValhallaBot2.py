@@ -1317,6 +1317,9 @@ async def check_live_streams():
         discord_id = twitch_to_discord.get(twitch_username)
         if not discord_id:
             continue
+        discord_id = twitch_to_discord.get(twitch_username)
+        if not discord_id:
+            continue
         # Gather stream summary data
         # Get Discord member
         member = None
@@ -1406,32 +1409,30 @@ async def check_live_streams():
                     )
         # Update currently_live
         currently_live = live_now
-
         # Build stream summary embed
-            embed = discord.Embed(
-                title=f"{streamer_name}'s Stream Summary",
-                color=color,
-                description=f"Here's a summary of your Valhalla Warrior support:"
+        embed = discord.Embed(
+            title=f"{streamer_name}'s Stream Summary",
+            color=color,
+            description=f"Here's a summary of your Valhalla Warrior support:"
+        )
+        # Chatters
+        if chatters:
+            chatter_names = []
+            for chatter_id in chatters.keys():
+                name = f"User({chatter_id})"
+                for guild in bot.guilds:
+                    member = guild.get_member(int(chatter_id))
+                    if member:
+                        name = member.display_name
+                        break
+                chatter_names.append(name)
+            embed.add_field(
+                name="Chatters",
+                value=f"You received {total_chats} chats from Valhalla Warriors\n" + ", ".join(chatter_names),
+                inline=False
             )
-            # Chatters
-            if chatters:
-                chatter_names = []
-                for chatter_id in chatters.keys():
-                    name = f"User({chatter_id})"
-                    for guild in bot.guilds:
-                        member = guild.get_member(int(chatter_id))
-                        if member:
-                            name = member.display_name
-                            break
-                    chatter_names.append(name)
-                embed.add_field(
-                    name="Chatters",
-                    value=f"You received {total_chats} chats from Valhalla Warriors\n" + ", ".join(chatter_names),
-                    inline=False
-                )
-            else:
-                embed.add_field(name="Chatters", value="No chatters this stream.", inline=False)
-
+        else:
+            embed.add_field(name="Chatters", value="No chatters this stream.", inline=False)
         # Get stream session times (approximate)
         stream_end = datetime.now(timezone.utc)
         stream_start = None
@@ -1443,7 +1444,6 @@ async def check_live_streams():
                 stream_start = stream_end - timedelta(hours=4)  # fallback
         else:
             stream_start = stream_end - timedelta(hours=4)  # fallback
-
         # Raids Received (only during stream session)
         async with conn.cursor() as cur:
             await cur.execute(
@@ -1471,7 +1471,6 @@ async def check_live_streams():
             )
         else:
             embed.add_field(name="Raids", value="No raids this stream.", inline=False)
-
         # Raids Sent (only during stream session)
         async with conn.cursor() as cur:
             await cur.execute(
@@ -1498,14 +1497,11 @@ async def check_live_streams():
                 inline=False
             )
         # ...existing code...
-
         embed.timestamp = datetime.now(timezone.utc)
-        embed.set_footer(text="\nᚠᚢᚾᛖᚱᚨᛚᚠᚢᚾᛖᚱᚨᛚ\nSkål for your efforts in Valhalla!\nᚠᚢᚾᛖᚱᚨᛚᚠᚢᚾᛖᚱᚨᛚ\n")
-
+        embed.set_footer(text="\nᚠᚢᾖᚱᚨᛚᚠᚢᚾᛖᚱᚨᛚ\nSkål for your efforts in Valhalla!\nᚠᚢᾖᚱᚨᛚᚠᚢᚾᛖᚱᚨᛚ\n")
         # Tag the streamer and send summary
         await channel.send(f"Hey <@{discord_id}>, Awesome stream!")
         await channel.send(embed=embed)
-
         # Award chat points and update ranks for all users who chatted during the stream
         logger.info(f"[StreamEnd] Awarding chat points and updating ranks for streamer '{twitch_username}' (discord_id={discord_id})")
         async with conn.cursor() as cur_award:
@@ -1517,6 +1513,10 @@ async def check_live_streams():
                 logger.info(f"[StreamEnd] Awarding chat points: chatter_id={chatter_id}, streamer_twitch_username={twitch_username}, count={count}")
                 await award_chat_points(conn, chatter_id, twitch_username, count)
                 await update_user_rank(conn, chatter_id)
+        stream_chat_counts.pop(twitch_username, None)
+    await conn.close()
+    currently_live.clear()
+    currently_live.update(live_now)
 
         stream_chat_counts.pop(twitch_username, None)
     
